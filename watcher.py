@@ -136,6 +136,8 @@ def _print_trade(trade, rec):
 
 
 def main():
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
     cfg = lib.load_config()
     rpc_url = cfg["chain"]["rpc"]
     d = lib.data_dir(cfg)
