@@ -1,0 +1,27 @@
+{
+  "chain": {
+    "name": "robinhood",
+    "chain_id": 4663,
+    "rpc": "https://rpc.mainnet.chain.robinhood.com",
+    "blockscout": "https://robinhoodchain.blockscout.com",
+    "dexscreener_chain_id": "robinhood"
+  },
+  "trader": {
+    "handle": "AvgJoesCrypto",
+    "evm_address": "0x06de9c48b1e639ed5c13ec8fbd4080a38e39f2d1",
+    "solana_address": "H2QSGECp13sFLJgdTsDtayX3dk18Dm6sQMSQKcew7Xzk",
+    "ref_capital_usd": 900000
+  },
+  "vault": {
+    "aum_usd": 100000,
+    "max_trade_pct": 0.05,
+    "min_copy_usd": 10,
+    "max_slippage_bps": 150
+  },
+  "watcher": {
+    "poll_seconds": 3,
+    "backfill_blocks": 900000,
+    "log_chunk_blocks": 200000,
+    "data_dir": "data"
+  }
+}

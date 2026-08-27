@@ -1,0 +1,164 @@
+"""Shared helpers: JSON-RPC, ERC-20 metadata, dexscreener prices, jsonl logs."""
+
+import json
+import time
+from pathlib import Path
+
+import requests
+
+ROOT = Path(__file__).parent
+TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+
+_session = requests.Session()
+_session.headers["User-Agent"] = "fomo-copy-vault-prototype/0.1"
+
+
+def load_config():
+    return json.loads((ROOT / "config.json").read_text())
+
+
+def data_dir(cfg):
+    d = ROOT / cfg["watcher"]["data_dir"]
+    d.mkdir(exist_ok=True)
+    return d
+
+
+def append_jsonl(path, obj):
+    with open(path, "a") as f:
+        f.write(json.dumps(obj, separators=(",", ":")) + "\n")
+
+
+def read_jsonl(path):
+    if not Path(path).exists():
+        return []
+    with open(path) as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+# ---------------------------------------------------------------- JSON-RPC
+
+def rpc(url, method, params, retries=3):
+    for attempt in range(retries):
+        try:
+            r = _session.post(url, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params}, timeout=20)
+            r.raise_for_status()
+            body = r.json()
+            if "error" in body:
+                raise RuntimeError(f"RPC error for {method}: {body['error']}")
+            return body["result"]
+        except (requests.RequestException, RuntimeError):
+            if attempt == retries - 1:
+                raise
+            time.sleep(1.5 * (attempt + 1))
+
+
+def pad_address(addr):
+    return "0x" + addr.lower().replace("0x", "").rjust(64, "0")
+
+
+def get_transfer_logs(rpc_url, address, from_block, to_block):
+    """All ERC-20 Transfer logs where `address` is sender or recipient.
+
+    The trader account is EIP-7702 delegated (fomo's relayer submits the txs),
+    so we must filter on Transfer topics, not on tx.from.
+    """
+    logs = []
+    base = {"fromBlock": hex(from_block), "toBlock": hex(to_block)}
+    for topics in ([TRANSFER_TOPIC, pad_address(address)],
+                   [TRANSFER_TOPIC, None, pad_address(address)]):
+        logs.extend(rpc(rpc_url, "eth_getLogs", [{**base, "topics": topics}]))
+    seen = set()
+    unique = []
+    for lg in logs:
+        key = (lg["transactionHash"], lg["logIndex"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(lg)
+    return unique
+
+
+_block_ts_cache = {}
+
+
+def block_timestamp(rpc_url, block_hex):
+    if block_hex not in _block_ts_cache:
+        blk = rpc(rpc_url, "eth_getBlockByNumber", [block_hex, False])
+        _block_ts_cache[block_hex] = int(blk["timestamp"], 16)
+    return _block_ts_cache[block_hex]
+
+
+# ---------------------------------------------------------------- ERC-20 metadata
+
+_TOKENS_FILE = ROOT / "data" / "tokens.json"
+_tokens_cache = None
+
+
+def _eth_call(rpc_url, to, selector):
+    return rpc(rpc_url, "eth_call", [{"to": to, "data": selector}, "latest"])
+
+
+def _decode_string(hexdata):
+    raw = bytes.fromhex(hexdata.replace("0x", ""))
+    if len(raw) == 32:  # bytes32-style symbol
+        return raw.rstrip(b"\x00").decode("utf-8", "replace")
+    length = int.from_bytes(raw[32:64], "big")
+    return raw[64:64 + length].decode("utf-8", "replace")
+
+
+def token_meta(rpc_url, token):
+    global _tokens_cache
+    if _tokens_cache is None:
+        _tokens_cache = json.loads(_TOKENS_FILE.read_text()) if _TOKENS_FILE.exists() else {}
+    token = token.lower()
+    if token not in _tokens_cache:
+        try:
+            symbol = _decode_string(_eth_call(rpc_url, token, "0x95d89b41"))  # symbol()
+            decimals = int(_eth_call(rpc_url, token, "0x313ce567"), 16)       # decimals()
+        except Exception:
+            symbol, decimals = token[:10], 18
+        _tokens_cache[token] = {"symbol": symbol, "decimals": decimals}
+        _TOKENS_FILE.parent.mkdir(exist_ok=True)
+        _TOKENS_FILE.write_text(json.dumps(_tokens_cache, indent=1))
+    return _tokens_cache[token]
+
+
+# ---------------------------------------------------------------- dexscreener prices
+
+_price_cache = {}  # token -> (ts, {"price":..., "liquidity":...})
+PRICE_TTL = 20
+
+
+def token_price_info(token, chain_slug):
+    """{"price": usd or None, "liquidity": usd} from the deepest dexscreener pair on this chain."""
+    token = token.lower()
+    now = time.time()
+    if token in _price_cache and now - _price_cache[token][0] < PRICE_TTL:
+        return _price_cache[token][1]
+    info = {"price": None, "liquidity": 0.0}
+    try:
+        r = _session.get(f"https://api.dexscreener.com/latest/dex/tokens/{token}", timeout=15)
+        r.raise_for_status()
+        pairs = [p for p in (r.json().get("pairs") or []) if p.get("chainId") == chain_slug]
+        best = None
+        for p in pairs:
+            liq = (p.get("liquidity") or {}).get("usd") or 0
+            px = None
+            if p.get("baseToken", {}).get("address", "").lower() == token:
+                px = p.get("priceUsd")
+            elif p.get("quoteToken", {}).get("address", "").lower() == token and p.get("priceUsd") and p.get("priceNative"):
+                try:  # price of quote token = priceUsd / priceNative
+                    px = float(p["priceUsd"]) / float(p["priceNative"])
+                except (ValueError, ZeroDivisionError):
+                    px = None
+            if px is not None and (best is None or liq > best[0]):
+                best = (liq, float(px))
+        if best:
+            info = {"price": best[1], "liquidity": best[0]}
+    except requests.RequestException:
+        pass
+    _price_cache[token] = (now, info)
+    return info
+
+
+def price_usd(token, chain_slug):
+    return token_price_info(token, chain_slug)["price"]
