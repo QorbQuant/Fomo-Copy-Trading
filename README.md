@@ -47,6 +47,27 @@ Outputs in `data/`: `trades.jsonl` (normalized trader activity),
 `copy_trades.jsonl` (what the vault would have done, with detection-time fill
 prices and latency-drift bps vs the trader's implied execution price).
 
+## Solana sleeve (cross-chain execution)
+
+The vault's Solana arm follows the fomo pattern: a dedicated Solana address
+per vault, pre-funded so copies execute at detection latency (bridge time only
+affects rebalancing).
+
+- **On-chain (EVM side):** `CopyVault.fundSleeve()` creates a deBridge DLN
+  order itself with the receiver pinned to the owner-set sleeve pubkey — the
+  executor picks timing/size but can never redirect funds. Capped at
+  `sleeveCapBps` of NAV (30%). Mocked DLN on testnet; wire the real DlnSource
+  address on chains where deBridge is live.
+- **Keeper (`sleeve.py`):** every Solana copy signal is quoted through
+  Jupiter (real route + price impact) and logged to `data/sleeve_fills.jsonl`.
+  Paper mode by default; real signing with the sleeve keypair only with
+  `SLEEVE_EXECUTE=1` + `SLEEVE_SOLANA_SECRET` in `.env` (gitignored).
+- **Redemption:** in-kind for Robinhood Chain holdings; the sleeve enters NAV
+  as one line and exits cash-settled, bounded by the cap.
+- Endgame (not built): replace the sleeve keypair with an Anchor program
+  authorized by cross-chain messages — same EVM vault, trust-minimized Solana
+  custody.
+
 ## Chain split (measured 2026-08-29, 3-day window)
 
 `solana_watcher.py` watches the trader's ~52 Solana token accounts (fomo's

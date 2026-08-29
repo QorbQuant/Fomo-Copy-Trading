@@ -3,8 +3,9 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {CopyVault, ICopyRouter} from "../src/CopyVault.sol";
+import {IDlnSource} from "../src/IDlnSource.sol";
 import {IERC20} from "../src/MiniERC20.sol";
-import {MockERC20, MockRouter} from "../src/mocks/Mocks.sol";
+import {MockDlnSource, MockERC20, MockRouter} from "../src/mocks/Mocks.sol";
 
 contract CopyVaultTest is Test {
     CopyVault vault;
@@ -206,5 +207,68 @@ contract CopyVaultTest is Test {
         vm.prank(keeper);
         vault.postNav(1_000e6);
         buyMeme1(50e6);
+    }
+
+    // ---------------------------------------------------------------- sleeve
+
+    bytes constant SLEEVE = hex"1f2e3d4c5b6a79880102030405060708090a0b0c0d0e0f10111213141516aa01";
+    bytes constant SOL_USDC = hex"c6fa7af3bedbad3a3d65f36aabc97431b1bbe4c2d2f6e0e47ca60203452f5d61";
+
+    function setupSleeve() internal returns (MockDlnSource dln) {
+        dln = new MockDlnSource();
+        vault.setSleeve(IDlnSource(address(dln)), SLEEVE, SOL_USDC, 3000);
+        deposit(alice, 1_000e6);
+        vm.prank(keeper);
+        vault.postNav(1_000e6);
+        vm.deal(keeper, 1 ether);
+    }
+
+    function test_fundSleevePinsReceiver() public {
+        MockDlnSource dln = setupSleeve();
+        uint256 fee = dln.FEE();
+        vm.prank(keeper);
+        bytes32 id = vault.fundSleeve{value: fee}(200e6, 199e6);
+        assertTrue(id != bytes32(0));
+        (address giveToken, uint256 giveAmount,,, uint256 takeChainId,,,,,,) = dln.lastOrder();
+        assertEq(giveToken, address(usdc));
+        assertEq(giveAmount, 200e6);
+        assertEq(takeChainId, vault.sleeveChainId());
+        // the executor never supplies a receiver; the order carries the pinned one
+        assertEq(usdc.balanceOf(address(dln)), 200e6);
+        assertEq(vault.sleeveFundedAsset(), 200e6);
+    }
+
+    function test_fundSleeveCapEnforced() public {
+        MockDlnSource dln = setupSleeve();
+        uint256 fee = dln.FEE();
+        vm.prank(keeper);
+        vault.fundSleeve{value: fee}(200e6, 0); // 20% of NAV
+        vm.prank(keeper);
+        vm.expectRevert(CopyVault.SleeveCapExceeded.selector);
+        vault.fundSleeve{value: fee}(101e6, 0); // would pass 30% cap
+        vm.prank(keeper);
+        vault.noteSleeveReturn(200e6); // sleeve bridged everything back
+        vm.prank(keeper);
+        vault.fundSleeve{value: fee}(300e6, 0); // full cap available again
+        assertEq(vault.sleeveFundedAsset(), 300e6);
+    }
+
+    function test_fundSleeveOnlyExecutorAndConfigured() public {
+        MockDlnSource dln = setupSleeve();
+        vm.prank(alice);
+        vm.expectRevert(CopyVault.NotExecutor.selector);
+        vault.fundSleeve(10e6, 0);
+
+        CopyVault bare = new CopyVault(IERC20(address(usdc)), keeper, ICopyRouter(address(router)));
+        uint256 fee = dln.FEE();
+        vm.prank(keeper);
+        vm.expectRevert(CopyVault.SleeveNotConfigured.selector);
+        bare.fundSleeve{value: fee}(10e6, 0);
+    }
+
+    function test_setSleeveValidatesPubkeys() public {
+        MockDlnSource dln = new MockDlnSource();
+        vm.expectRevert(bytes("pubkey"));
+        vault.setSleeve(IDlnSource(address(dln)), hex"beef", SOL_USDC, 3000);
     }
 }

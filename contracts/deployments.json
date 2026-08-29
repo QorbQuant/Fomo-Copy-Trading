@@ -3,12 +3,15 @@
     "chain_id": 46630,
     "rpc": "https://rpc.testnet.chain.robinhood.com",
     "explorer": "https://explorer.testnet.chain.robinhood.com",
-    "deployed_at": "2026-08-28",
+    "deployed_at": "2026-08-29",
     "deployer_executor": "0x27813048104759935DD6D505e8cddda1a5f4EFA1",
-    "vault": "0xCF17a9794BDDD0c51F176F6A409601817906FfDa",
-    "mUSDC": "0x33D8BA2F03dCf1c7a3d519DC07c5B754Cb72d72E",
-    "mCHILL": "0x12b508A1883b910a537c25883AE7DB518c1511D9",
-    "mBOOMER": "0x2AE979dEDD5557abA4316Dd921974556748e8Bd9",
-    "router": "0xd048Fe99f21073977c2A957b5D278f264c9bc2fc"
+    "vault": "0xC7F39718D76F54040DC88cee1b5DA9A8AFcf4b54",
+    "mUSDC": "0x2Df3E18f0f6A6b712e9BFF9Cc3b111986724202E",
+    "mCHILL": "0x1748A3d892F62a81574C579e45EFB6039c142677",
+    "mBOOMER": "0x96804F5AB68268f54BBAf8c6F9e5693a284AA8f3",
+    "router": "0xD367980C7c6ABD10E5a3144Df1efF36cECd83453",
+    "mock_dln": "0xAA85ef20b031a21E6A6a6161E3643d6034aF7265",
+    "sleeve_solana_pubkey": "3CMFpnWW5eHSS1sr5gUadNQX2CDA5uweGgiH13f823WC",
+    "notes": "v1 vault without sleeve was 0xCF17a9794BDDD0c51F176F6A409601817906FfDa (superseded)"
   }
 }

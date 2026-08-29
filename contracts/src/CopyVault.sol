@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {MiniERC20, IERC20} from "./MiniERC20.sol";
+import {IDlnSource, OrderCreation} from "./IDlnSource.sol";
 
 /// Minimal swap interface the vault trades through. Concrete adapters
 /// (Uniswap V3, mock DEX on testnet) implement it.
@@ -39,12 +40,25 @@ contract CopyVault is MiniERC20 {
     uint256 public withdrawDelay = 1 hours;
     mapping(address => uint256) public lastDepositAt;
 
+    // -------- Solana sleeve (cross-chain execution) --------
+    // The vault funds a fixed Solana address ("the sleeve") through deBridge
+    // DLN orders it creates itself, so the executor can choose WHEN and HOW
+    // MUCH to fund but can never redirect funds: the receiver is pinned here.
+    IDlnSource public dlnSource;
+    bytes public sleeveReceiver; // 32-byte Solana pubkey of the sleeve wallet
+    bytes public sleeveTakeToken; // 32-byte mint the sleeve receives (USDC)
+    uint256 public sleeveChainId = 7565164; // deBridge's Solana chain id
+    uint256 public sleeveCapBps = 3000; // max share of NAV parked in the sleeve
+    uint256 public sleeveFundedAsset; // net asset units sent to the sleeve
+
     bool internal locked;
 
     event Deposit(address indexed from, uint256 assets, uint256 shares);
     event RedeemInKind(address indexed from, address indexed receiver, uint256 shares);
     event MirrorTrade(address indexed tokenIn, address indexed tokenOut, uint256 amountIn, uint256 amountOut);
     event NavPosted(uint256 totalNavAsset);
+    event SleeveFunded(uint256 amount, bytes32 orderId);
+    event SleeveReturned(uint256 amount);
 
     error NotOwner();
     error NotExecutor();
@@ -53,6 +67,8 @@ contract CopyVault is MiniERC20 {
     error TradeTooLarge();
     error WithdrawLocked();
     error Reentrancy();
+    error SleeveNotConfigured();
+    error SleeveCapExceeded();
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
@@ -102,6 +118,18 @@ contract CopyVault is MiniERC20 {
         navTtl = navTtl_;
     }
 
+    function setSleeve(IDlnSource dln, bytes calldata receiver, bytes calldata takeToken, uint256 capBps)
+        external
+        onlyOwner
+    {
+        require(receiver.length == 32 && takeToken.length == 32, "pubkey");
+        require(capBps <= 10_000, "bps");
+        dlnSource = dln;
+        sleeveReceiver = receiver;
+        sleeveTakeToken = takeToken;
+        sleeveCapBps = capBps;
+    }
+
     // ---------------------------------------------------------------- keeper
 
     /// Keeper posts the vault's total value in asset units. Gates deposits;
@@ -140,6 +168,52 @@ contract CopyVault is MiniERC20 {
         else if (IERC20(tokenIn).balanceOf(address(this)) == 0) _dropHeld(tokenIn);
 
         emit MirrorTrade(tokenIn, tokenOut, amountIn, amountOut);
+    }
+
+    /// Send `amount` of the asset to the fixed Solana sleeve via a DLN order.
+    /// The executor picks timing and size; the receiver, destination chain and
+    /// received token are pinned by the owner-set sleeve config.
+    function fundSleeve(uint256 amount, uint256 takeAmountMin)
+        external
+        payable
+        onlyExecutor
+        nonReentrant
+        returns (bytes32 orderId)
+    {
+        if (sleeveReceiver.length == 0) revert SleeveNotConfigured();
+        if (_navStale()) revert StaleNav();
+        if (sleeveFundedAsset + amount > totalNavAsset * sleeveCapBps / 10_000) {
+            revert SleeveCapExceeded();
+        }
+        sleeveFundedAsset += amount;
+
+        asset.approve(address(dlnSource), amount);
+        orderId = dlnSource.createOrder{value: msg.value}(
+            OrderCreation({
+                giveTokenAddress: address(asset),
+                giveAmount: amount,
+                takeTokenAddress: sleeveTakeToken,
+                takeAmount: takeAmountMin,
+                takeChainId: sleeveChainId,
+                receiverDst: sleeveReceiver,
+                givePatchAuthoritySrc: address(this),
+                orderAuthorityAddressDst: sleeveReceiver,
+                allowedTakerDst: "",
+                externalCall: "",
+                allowedCancelBeneficiarySrc: ""
+            }),
+            "",
+            0,
+            ""
+        );
+        emit SleeveFunded(amount, orderId);
+    }
+
+    /// Keeper attests that the sleeve returned `amount` of the asset to the
+    /// vault (bridged back). Trusted accounting, bounded by the sleeve cap.
+    function noteSleeveReturn(uint256 amount) external onlyExecutor {
+        sleeveFundedAsset = amount >= sleeveFundedAsset ? 0 : sleeveFundedAsset - amount;
+        emit SleeveReturned(amount);
     }
 
     // ---------------------------------------------------------------- users

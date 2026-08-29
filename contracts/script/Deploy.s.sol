@@ -3,8 +3,9 @@ pragma solidity ^0.8.24;
 
 import {Script, console} from "forge-std/Script.sol";
 import {CopyVault, ICopyRouter} from "../src/CopyVault.sol";
+import {IDlnSource} from "../src/IDlnSource.sol";
 import {IERC20} from "../src/MiniERC20.sol";
-import {MockERC20, MockRouter} from "../src/mocks/Mocks.sol";
+import {MockDlnSource, MockERC20, MockRouter} from "../src/mocks/Mocks.sol";
 
 /// Testnet/local deployment: mock USDC + two stand-in meme tokens + a
 /// fixed-rate mock DEX + the vault. The deployer key doubles as the executor.
@@ -36,12 +37,23 @@ contract Deploy is Script {
         // pocket money for the deployer to demo deposits
         usdc.mint(deployer, 1_000_000e6);
 
+        // Solana sleeve wiring: mock DLN on testnet, real DlnSource on chains
+        // where deBridge is live. Receiver/take-token from env (32-byte hex).
+        MockDlnSource dln = new MockDlnSource();
+        vault.setSleeve(
+            IDlnSource(address(dln)),
+            abi.encodePacked(vm.envBytes32("SLEEVE_RECEIVER32")),
+            abi.encodePacked(vm.envBytes32("SLEEVE_TAKE_TOKEN32")),
+            3000
+        );
+
         vm.stopBroadcast();
 
         console.log("mUSDC   ", address(usdc));
         console.log("mCHILL  ", address(chill));
         console.log("mBOOMER ", address(boomer));
         console.log("router  ", address(router));
+        console.log("dln     ", address(dln));
         console.log("vault   ", address(vault));
     }
 }

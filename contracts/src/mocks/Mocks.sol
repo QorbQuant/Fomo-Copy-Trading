@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {MiniERC20, IERC20} from "../MiniERC20.sol";
 import {ICopyRouter} from "../CopyVault.sol";
+import {IDlnSource, OrderCreation} from "../IDlnSource.sol";
 
 contract MockERC20 is MiniERC20 {
     constructor(string memory name_, string memory symbol_, uint8 decimals_)
@@ -11,6 +12,30 @@ contract MockERC20 is MiniERC20 {
 
     function mint(address to, uint256 amount) external {
         _mint(to, amount);
+    }
+}
+
+/// Records DLN orders for assertions; charges a fixed native fee like the
+/// real DlnSource and pulls the give amount.
+contract MockDlnSource is IDlnSource {
+    uint88 public constant FEE = 0.001 ether;
+    OrderCreation public lastOrder;
+    uint256 public orders;
+
+    function globalFixedNativeFee() external pure returns (uint88) {
+        return FEE;
+    }
+
+    function createOrder(OrderCreation calldata o, bytes calldata, uint32, bytes calldata)
+        external
+        payable
+        returns (bytes32)
+    {
+        require(msg.value == FEE, "fee");
+        require(IERC20(o.giveTokenAddress).transferFrom(msg.sender, address(this), o.giveAmount), "give");
+        lastOrder = o;
+        orders++;
+        return keccak256(abi.encode(o, orders));
     }
 }
 

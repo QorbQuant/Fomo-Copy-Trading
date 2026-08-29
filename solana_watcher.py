@@ -21,6 +21,7 @@ import time
 
 import copier
 import lib
+import sleeve
 from watcher import is_funding_token
 
 WSOL_MINT = "So11111111111111111111111111111111111111112"
@@ -105,7 +106,7 @@ def normalize_tx(cfg, signature, tx, detected_at, backfill):
         symbol = "SOL" if mint == "SOL" else (info["symbol"] or mint[:6])
         amount = abs(d["raw"]) / 10 ** d["decimals"]
         return {
-            "address": mint, "symbol": symbol, "amount": amount,
+            "address": mint, "symbol": symbol, "amount": amount, "decimals": d["decimals"],
             "price_usd": info["price"], "liquidity_usd": info["liquidity"],
             "usd": amount * info["price"] if info["price"] else None,
         }
@@ -161,12 +162,16 @@ def process_signatures(cfg, sig_infos, backfill=False):
         if trade["kind"] == "swap":
             n += 1
             rec = copier.plan_copy(cfg, trade, d / "copy_trades.jsonl")
+            fill = None
+            if rec and not backfill:
+                fill = sleeve.handle_copy(cfg, trade, rec)
             a = trade["asset_token"]
             lat = "" if backfill else f" lat={trade['latency_s']}s"
             copied = f"copy ${rec['copy_usd']}" if rec else "skip"
             tag = " (one-sided)" if trade.get("one_sided") else ""
+            jup = f" jup_impact={fill['impact_bps']}bps" if fill and fill.get("impact_bps") is not None else ""
             print(f"  [sol {trade['side']:4}] {a['amount']:,.4g} {a['symbol']} "
-                  f"(${(trade['usd_value'] or 0):,.0f}){tag}{lat} -> {copied}")
+                  f"(${(trade['usd_value'] or 0):,.0f}){tag}{lat} -> {copied}{jup}")
         else:
             print(f"  [sol funding] {trade['side']} {trade['asset_token']['symbol']} "
                   f"${(trade['usd_value'] or 0):,.0f} {trade['tx_hash'][:10]}")
