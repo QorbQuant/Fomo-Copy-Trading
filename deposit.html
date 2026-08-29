@@ -1,0 +1,131 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>avgJOE Vault — Deposit</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; background: #0d1117; color: #e6edf3;
+         max-width: 520px; margin: 3rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.3rem; } .sub { color: #8b949e; font-size: .85rem; word-break: break-all; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 1.2rem; margin: 1rem 0; }
+  .row { display: flex; justify-content: space-between; margin: .4rem 0; font-size: .95rem; }
+  .row span:first-child { color: #8b949e; }
+  button { background: #238636; color: #fff; border: 0; border-radius: 8px; padding: .7rem 1.1rem;
+           font-size: 1rem; cursor: pointer; margin-top: .6rem; width: 100%; }
+  button:disabled { background: #30363d; color: #8b949e; cursor: default; }
+  input { width: 100%; box-sizing: border-box; background: #0d1117; color: #e6edf3; border: 1px solid #30363d;
+          border-radius: 8px; padding: .7rem; font-size: 1.1rem; margin-top: .6rem; }
+  #status { font-size: .9rem; color: #d29922; margin-top: .8rem; min-height: 1.2em; word-break: break-all; }
+  a { color: #58a6ff; }
+</style>
+</head>
+<body>
+<h1>avgJOE Copy Vault — Deposit</h1>
+<p class="sub">Vault 0x12b508A1883b910a537c25883AE7DB518c1511D9 · USDG on Robinhood Chain (4663).
+Every action below is a MetaMask popup — your key never leaves your wallet.</p>
+
+<div class="card">
+  <button id="connect">Connect MetaMask</button>
+  <div class="row"><span>Account</span><span id="acct">—</span></div>
+  <div class="row"><span>Your USDG</span><span id="usdg">—</span></div>
+  <div class="row"><span>Your vault shares</span><span id="shares">—</span></div>
+  <div class="row"><span>Approved for vault</span><span id="allow">—</span></div>
+</div>
+
+<div class="card">
+  <input id="amount" type="number" min="0" step="any" placeholder="Amount in USDG (e.g. 100)">
+  <button id="approve" disabled>1 · Approve</button>
+  <button id="deposit" disabled>2 · Deposit</button>
+  <div id="status"></div>
+</div>
+
+<script>
+const VAULT = "0x12b508A1883b910a537c25883AE7DB518c1511D9";
+const USDG  = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168";
+const CHAIN = "0x1237"; // 4663
+const RPC   = "https://rpc.mainnet.chain.robinhood.com";
+let acct = null;
+
+const $ = id => document.getElementById(id);
+const pad = (hex) => hex.replace(/^0x/, "").toLowerCase().padStart(64, "0");
+const padN = (n) => n.toString(16).padStart(64, "0");
+const status = (m) => { $("status").textContent = m; };
+const fmt = (raw, dec, dp) => (Number(BigInt(raw)) / 10 ** dec).toLocaleString(undefined, {maximumFractionDigits: dp});
+
+async function rpcCall(to, data) {
+  return await ethereum.request({method: "eth_call", params: [{to, data}, "latest"]});
+}
+
+async function refresh() {
+  if (!acct) return;
+  const me = pad(acct);
+  const bal = await rpcCall(USDG, "0x70a08231" + me);
+  const allow = await rpcCall(USDG, "0xdd62ed3e" + me + pad(VAULT));
+  const shares = await rpcCall(VAULT, "0x70a08231" + me);
+  $("usdg").textContent = "$" + fmt(bal, 6, 2);
+  $("allow").textContent = "$" + fmt(allow, 6, 2);
+  $("shares").textContent = fmt(shares, 18, 4) + " avgJOE";
+  $("approve").disabled = false;
+  $("deposit").disabled = false;
+}
+
+function amountRaw() {
+  const v = parseFloat($("amount").value);
+  if (!v || v <= 0) { status("Enter an amount first."); return null; }
+  return BigInt(Math.round(v * 1e6));
+}
+
+async function ensureChain() {
+  try {
+    await ethereum.request({method: "wallet_switchEthereumChain", params: [{chainId: CHAIN}]});
+  } catch (e) {
+    if (e.code === 4902) {
+      await ethereum.request({method: "wallet_addEthereumChain", params: [{
+        chainId: CHAIN, chainName: "Robinhood Chain", rpcUrls: [RPC],
+        nativeCurrency: {name: "Ether", symbol: "ETH", decimals: 18},
+        blockExplorerUrls: ["https://robinhoodchain.blockscout.com"]
+      }]});
+    } else { throw e; }
+  }
+}
+
+async function send(to, data, label) {
+  status(label + " — confirm in MetaMask…");
+  const tx = await ethereum.request({method: "eth_sendTransaction", params: [{from: acct, to, data}]});
+  status(label + " sent: " + tx + " — waiting…");
+  for (let i = 0; i < 60; i++) {
+    await new Promise(r => setTimeout(r, 1500));
+    const rec = await ethereum.request({method: "eth_getTransactionReceipt", params: [tx]});
+    if (rec) {
+      status(rec.status === "0x1" ? label + " confirmed ✓" : label + " REVERTED — tell Claude: " + tx);
+      await refresh();
+      return rec.status === "0x1";
+    }
+  }
+  status(label + ": still pending — check the explorer: " + tx);
+  return false;
+}
+
+$("connect").onclick = async () => {
+  if (!window.ethereum) { status("MetaMask not detected — open this page in the browser with MetaMask installed."); return; }
+  const accts = await ethereum.request({method: "eth_requestAccounts"});
+  acct = accts[0];
+  await ensureChain();
+  $("acct").textContent = acct.slice(0, 6) + "…" + acct.slice(-4);
+  status("");
+  await refresh();
+};
+
+$("approve").onclick = async () => {
+  const amt = amountRaw(); if (amt === null) return;
+  await send(USDG, "0x095ea7b3" + pad(VAULT) + padN(amt), "Approve");
+};
+
+$("deposit").onclick = async () => {
+  const amt = amountRaw(); if (amt === null) return;
+  await send(VAULT, "0xb6b55f25" + padN(amt), "Deposit");
+};
+</script>
+</body>
+</html>
