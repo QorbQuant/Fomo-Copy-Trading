@@ -127,3 +127,10 @@ the keeper key. Executions land in `data/executions.jsonl`.
 python executor.py --test   # inject one synthetic buy, then follow live
 python executor.py          # follow live signals
 ```
+
+**Initial sync (Hyperliquid-style):** `sync.py` brings the vault to the
+trader's current portfolio weights before flow-mirroring takes over — fetches
+the live book from Blockscout, computes weights (stables = cash), and
+buys/sells in clips within the vault's 5% per-trade cap. Idempotent; rerun to
+correct drift. `--dry-run` prints the plan. Pause `executor.py` while it runs
+(same keeper key — nonce collisions).
