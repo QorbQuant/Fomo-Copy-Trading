@@ -99,7 +99,11 @@ def main():
     clip_cap = nav * CLIP_FRACTION
     asset = ex.asset_addr()
     for p in plan:
-        tok = ex.ensure_token(p["addr"], p["symbol"], p["price"])
+        try:
+            tok = ex.ensure_token(p["addr"], p["symbol"], p["price"])
+        except RuntimeError as e:
+            print(f"  [sync] skipping {p['symbol']}: {e}")
+            continue
         dec = tok["decimals"]
         remaining = abs(p["delta"])
         side = "buy" if p["delta"] > 0 else "sell"
@@ -115,7 +119,7 @@ def main():
                     return
                 amount_in = int(clip * 1e6)
                 if ex.mainnet:
-                    min_out = int(ex.quote_out(tok["path_buy"], amount_in) * 0.97)
+                    min_out = ex.min_out(tok, "buy", amount_in)
                 else:
                     min_out = int(clip / p["price"] * 10 ** dec * 0.97)
                 tx = ex.send(ex.dep["vault"], "mirrorTrade(address,address,uint256,uint256)",
@@ -123,7 +127,7 @@ def main():
             else:
                 amount_in = int(clip / p["price"] * 10 ** dec)
                 if ex.mainnet:
-                    min_out = int(ex.quote_out(tok["path_sell"], amount_in) * 0.97)
+                    min_out = ex.min_out(tok, "sell", amount_in)
                 else:
                     min_out = int(clip * 1e6 * 0.97)
                 tx = ex.send(ex.dep["vault"], "mirrorTrade(address,address,uint256,uint256)",

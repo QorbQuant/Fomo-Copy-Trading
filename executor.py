@@ -25,6 +25,8 @@ import sys
 import time
 from pathlib import Path
 
+import requests
+
 import lib
 
 ROOT = Path(__file__).parent
@@ -38,7 +40,23 @@ WETH = "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"
 USDG = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"
 QUOTER_V2 = "0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7"
 V3_FACTORY = "0x1f7d7550b1b028f7571e69a784071f0205fd2efa"
+V4_QUOTER = "0x8dc178efb8111bb0973dd9d722ebeff267c98f94"
+POSITION_MANAGER = "0x58daec3116aae6d93017baaea7749052e8a04fa7"
 FEE_TIERS = (100, 500, 3000, 10000)
+ZERO = "0x0000000000000000000000000000000000000000"
+
+# Route legs (python-side mirror of RouteAdapter.Leg):
+#   {"kind": 0, "path": "0x.."}                                    v3 multihop
+#   {"kind": 1, "key": {"c0","c1","fee","tick","hooks"}, "zf": b}  v4 single pool
+SET_ROUTE_SIG = "setRoute(address,address,(uint8,bytes,(address,address,uint24,int24,address),bool)[])"
+
+
+def leg_cast_str(leg):
+    if leg["kind"] == 0:
+        return f"(0,{leg['path']},({ZERO},{ZERO},0,0,{ZERO}),false)"
+    k = leg["key"]
+    return (f"(1,0x,({k['c0']},{k['c1']},{k['fee']},{k['tick']},{k['hooks']}),"
+            f"{'true' if leg['zf'] else 'false'})")
 
 
 def env():
@@ -141,40 +159,184 @@ class Executor:
         print(f"  [exec] deployed {name} -> {mock}")
         return tok
 
-    def _onboard_mainnet_token(self, token, symbol):
-        """Allowlist the real token and set the deepest Uniswap V3 route."""
-        decimals = uint(self.call(token, "decimals()(uint8)"))
+    def _deepest_fee(self, token, quote, qprice, qdec):
+        """Deepest V3 fee tier for token/quote by USD depth -> (depth_usd, fee) or None."""
+        best = None
+        for fee in FEE_TIERS:
+            pool = self.call(V3_FACTORY, "getPool(address,address,uint24)(address)",
+                             token, quote, fee).strip()
+            if int(pool, 16) == 0:
+                continue
+            depth = uint(self.call(quote, "balanceOf(address)(uint256)", pool)) / 10**qdec * qprice
+            if best is None or depth > best[0]:
+                best = (depth, fee)
+        return best
+
+    def _dexscreener_pairs(self, token, label):
+        """Uniswap pairs of one version for a token, deepest first:
+        [(other_address, liq_usd, pair_id)]."""
+        try:
+            r = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token}",
+                             headers={"User-Agent": "copy-vault"}, timeout=15)
+            pairs = [p for p in (r.json().get("pairs") or [])
+                     if p.get("chainId") == "robinhood" and p.get("dexId") == "uniswap"
+                     and (p.get("labels") or []) == [label]]
+        except requests.RequestException:
+            return []
+        out = []
+        for p in sorted(pairs, key=lambda p: -((p.get("liquidity") or {}).get("usd") or 0)):
+            base, quote = p["baseToken"]["address"], p["quoteToken"]["address"]
+            other = quote if base.lower() == token.lower() else base
+            liq = (p.get("liquidity") or {}).get("usd") or 0
+            if liq >= 1000 and other.lower() not in {a.lower() for a, _, _ in out}:
+                out.append((other, liq, p["pairAddress"]))
+        return out
+
+    def _dexscreener_intermediates(self, token):
+        skip = {USDG.lower(), WETH.lower(), token.lower(), ZERO}
+        return [(a, liq) for a, liq, _ in self._dexscreener_pairs(token, "v3")
+                if a.lower() not in skip][:3]
+
+    def _v4_pool_key(self, pair_id):
+        """Resolve a dexscreener v4 pool id -> PoolKey dict via PositionManager."""
+        out = self.call(POSITION_MANAGER, "poolKeys(bytes25)(address,address,uint24,int24,address)",
+                        pair_id[:52]).splitlines()
+        c0, c1, fee, tick, hooks = [x.split()[0] for x in out]
+        if int(c0, 16) == 0:
+            return None  # native-ETH pool, unsupported by the adapter
+        return {"c0": c0, "c1": c1, "fee": int(fee), "tick": int(tick), "hooks": hooks}
+
+    def _v3_prefix_to(self, target, eth_price):
+        """Cheapest v3 legs from USDG to `target` (and reverse) or None."""
+        t = target.lower()
+        if t == USDG.lower():
+            return [], []
+        if t == WETH.lower():
+            uw = self._usdg_weth_fee()
+            return ([{"kind": 0, "path": encode_path(USDG, uw, WETH)}],
+                    [{"kind": 0, "path": encode_path(WETH, uw, USDG)}])
+        d = self._deepest_fee(target, USDG, 1.0, 6)
+        if d and d[0] >= 1000:
+            return ([{"kind": 0, "path": encode_path(USDG, d[1], target)}],
+                    [{"kind": 0, "path": encode_path(target, d[1], USDG)}])
+        w = self._deepest_fee(target, WETH, eth_price, 18)
+        if w and w[0] >= 1000:
+            uw = self._usdg_weth_fee()
+            return ([{"kind": 0, "path": encode_path(USDG, uw, WETH, w[1], target)}],
+                    [{"kind": 0, "path": encode_path(target, w[1], WETH, uw, USDG)}])
+        return None
+
+    def quote_route(self, legs, amount_in):
+        """Chain quotes through mixed v3/v4 legs -> final raw amount out."""
+        amt = int(amount_in)
+        for leg in legs:
+            if leg["kind"] == 0:
+                amt = self.quote_out(leg["path"], amt)
+            else:
+                k, zf = leg["key"], "true" if leg["zf"] else "false"
+                out = self.call(
+                    V4_QUOTER,
+                    "quoteExactInputSingle(((address,address,uint24,int24,address),bool,uint128,bytes))(uint256,uint256)",
+                    f"(({k['c0']},{k['c1']},{k['fee']},{k['tick']},{k['hooks']}),{zf},{amt},0x)")
+                amt = uint(out.splitlines()[0])
+        return amt
+
+    def _discover_route(self, token, symbol):
+        """Read-only: best USDG<->token route -> (legs_buy, legs_sell, desc, depth_usd).
+
+        Preference order: V3 USDG-direct / WETH-hop / V3-intermediate, then V4
+        pools (single leg, with a V3 prefix when the pool is quoted in WETH or
+        another routable token — e.g. SIT's hooked V4 pool quoted in AI).
+        Every candidate is probe-quoted end-to-end before being accepted.
+        """
         eth_price = lib.price_usd(WETH.lower(), "robinhood") or 0
-        best = None  # (depth_usd, quote, fee)
-        for quote, qprice, qdec in ((USDG, 1.0, 6), (WETH, eth_price, 18)):
-            for fee in FEE_TIERS:
-                pool = self.call(V3_FACTORY, "getPool(address,address,uint24)(address)",
-                                 token, quote, fee).strip()
-                if int(pool, 16) == 0:
+        candidates = []  # (depth, legs_buy, legs_sell, desc)
+
+        def v3_candidate(pb, ps, depth, desc):
+            candidates.append((depth, [{"kind": 0, "path": pb}], [{"kind": 0, "path": ps}], desc))
+
+        d = self._deepest_fee(token, USDG, 1.0, 6)
+        if d and d[0] >= 1000:
+            v3_candidate(encode_path(USDG, d[1], token), encode_path(token, d[1], USDG),
+                         d[0], f"v3 USDG direct fee {d[1]}")
+        w = self._deepest_fee(token, WETH, eth_price, 18)
+        if w and w[0] >= 1000:
+            uw = self._usdg_weth_fee()
+            v3_candidate(encode_path(USDG, uw, WETH, w[1], token),
+                         encode_path(token, w[1], WETH, uw, USDG),
+                         w[0], f"v3 WETH hop fee {w[1]}")
+
+        if not candidates:
+            for inter, _liq in self._dexscreener_intermediates(token):
+                iprice = lib.price_usd(inter.lower(), "robinhood")
+                if not iprice:
                     continue
-                depth = uint(self.call(quote, "balanceOf(address)(uint256)", pool)) / 10**qdec * qprice
-                if best is None or depth > best[0]:
-                    best = (depth, quote, fee)
-        if not best or best[0] < 1000:
-            raise RuntimeError(f"no usable pool for {symbol} (best depth ${0 if not best else best[0]:,.0f})")
-        _, quote, fee = best
-        if quote == USDG:
-            path_buy = encode_path(USDG, fee, token)
-            path_sell = encode_path(token, fee, USDG)
-        else:
-            uw_fee = self._usdg_weth_fee()
-            path_buy = encode_path(USDG, uw_fee, WETH, fee, token)
-            path_sell = encode_path(token, fee, WETH, uw_fee, USDG)
-        self.send(self.dep["adapter"], "setPath(address,address,bytes)", USDG, token, path_buy)
-        self.send(self.dep["adapter"], "setPath(address,address,bytes)", token, USDG, path_sell)
+                idec = uint(self.call(inter, "decimals()(uint8)"))
+                ti = self._deepest_fee(token, inter, iprice, idec)
+                if not ti or ti[0] < 1000:
+                    continue
+                prefix = self._v3_prefix_to(inter, eth_price)
+                if prefix is None:
+                    continue
+                pre_buy, pre_sell = prefix  # non-empty: intermediates exclude USDG/WETH
+                # extend the USDG->inter path by one hop into the token
+                buy_path = pre_buy[0]["path"] + ti[1].to_bytes(3, "big").hex() + token[2:].lower()
+                sell_path = "0x" + token[2:].lower() + ti[1].to_bytes(3, "big").hex() \
+                    + pre_sell[0]["path"][2:]
+                v3_candidate(buy_path, sell_path, ti[0], f"v3 via {inter[:10]}.. fee {ti[1]}")
+                break
+
+        # V4 fallback: deepest v4 pairs, single v4 leg + v3 prefix to its quote side
+        if not candidates:
+            for other, liq, pair_id in self._dexscreener_pairs(token, "v4")[:3]:
+                if other.lower() == ZERO:
+                    continue  # native-ETH v4 pools unsupported
+                key = self._v4_pool_key(pair_id)
+                if key is None:
+                    continue
+                if token.lower() not in (key["c0"].lower(), key["c1"].lower()):
+                    continue
+                prefix = self._v3_prefix_to(other, eth_price)
+                if prefix is None:
+                    continue
+                pre_buy, pre_sell = prefix
+                zf_buy = other.lower() == key["c0"].lower()  # buying: in = other side
+                legs_buy = pre_buy + [{"kind": 1, "key": key, "zf": zf_buy}]
+                legs_sell = [{"kind": 1, "key": key, "zf": not zf_buy}] + pre_sell
+                candidates.append((liq, legs_buy, legs_sell,
+                                   f"v4 pool vs {other[:10]}.. (hooked)" if int(key["hooks"], 16)
+                                   else f"v4 pool vs {other[:10]}.."))
+                break
+
+        for depth, lb, ls, desc in sorted(candidates, key=lambda c: -c[0]):
+            try:
+                if self.quote_route(lb, 5 * 10**6) > 0:
+                    return lb, ls, desc, depth
+            except Exception:
+                continue
+        raise RuntimeError(f"no routable Uniswap liquidity for {symbol}")
+
+    def _onboard_mainnet_token(self, token, symbol):
+        """Allowlist the real token and configure its route on the RouteAdapter."""
+        decimals = uint(self.call(token, "decimals()(uint8)"))
+        legs_buy, legs_sell, desc, depth = self._discover_route(token, symbol)
+        adapter = self.dep["route_adapter"]
+        self.send(adapter, SET_ROUTE_SIG, USDG, token,
+                  "[" + ",".join(leg_cast_str(l) for l in legs_buy) + "]")
+        self.send(adapter, SET_ROUTE_SIG, token, USDG,
+                  "[" + ",".join(leg_cast_str(l) for l in legs_sell) + "]")
         self.send(self.dep["vault"], "setAllowedToken(address,bool)", token, "true")
-        tok = {"addr": token, "decimals": decimals, "path_buy": path_buy, "path_sell": path_sell,
-               "pool_depth_usd": round(best[0])}
+        tok = {"addr": token, "decimals": decimals, "legs_buy": legs_buy,
+               "legs_sell": legs_sell, "pool_depth_usd": round(depth), "route": desc}
         self.state["token_map"][token.lower()] = tok
         self.save()
-        print(f"  [exec] onboarded {symbol}: fee {fee} via "
-              f"{'USDG direct' if quote == USDG else 'WETH hop'}, depth ${best[0]:,.0f}")
+        print(f"  [exec] onboarded {symbol}: {desc}, depth ${depth:,.0f}")
         return tok
+
+    def min_out(self, tok, side, amount_in):
+        """Quoted minimum output for a mainnet trade, slippage-adjusted."""
+        legs = tok["legs_buy"] if side == "buy" else tok["legs_sell"]
+        return int(self.quote_route(legs, amount_in) * (1 - SLIPPAGE))
 
     def _usdg_weth_fee(self):
         if "usdg_weth_fee" in self.state:
@@ -245,7 +407,7 @@ class Executor:
         if rec["side"] == "buy":
             amount_in = int(usd * 1e6)
             if self.mainnet:
-                min_out = int(self.quote_out(tok["path_buy"], amount_in) * (1 - SLIPPAGE))
+                min_out = self.min_out(tok, "buy", amount_in)
             else:
                 min_out = int(usd / price * 10 ** tok["decimals"] * (1 - SLIPPAGE))
             tx = self.send(self.dep["vault"], "mirrorTrade(address,address,uint256,uint256)",
@@ -256,7 +418,7 @@ class Executor:
             if amount_in == 0:
                 return
             if self.mainnet:
-                min_out = int(self.quote_out(tok["path_sell"], amount_in) * (1 - SLIPPAGE))
+                min_out = self.min_out(tok, "sell", amount_in)
             else:
                 min_out = int(amount_in / 10 ** tok["decimals"] * price * 1e6 * (1 - SLIPPAGE))
             tx = self.send(self.dep["vault"], "mirrorTrade(address,address,uint256,uint256)",
@@ -292,7 +454,10 @@ class Executor:
                             if time.time() - rec.get("detected_at", 0) > MAX_SIGNAL_AGE_S:
                                 print(f"  [exec] stale signal skipped: {rec['asset_symbol']}")
                                 continue
-                            self.execute(rec)
+                            try:
+                                self.execute(rec)
+                            except Exception as e:
+                                print(f"  [exec warn] {rec['asset_symbol']}: {e}")
                 self.post_nav()
             except KeyboardInterrupt:
                 raise
