@@ -21,8 +21,9 @@
   "solana": {
     "rpc": "https://api.mainnet-beta.solana.com",
     "dexscreener_chain_id": "solana",
-    "backfill_sigs": 400,
-    "poll_seconds": 5,
+    "backfill_sigs_per_account": 100,
+    "backfill_days": 3,
+    "poll_seconds": 30,
     "rpc_pause": 0.15
   },
   "watcher": {

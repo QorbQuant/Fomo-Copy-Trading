@@ -2,6 +2,11 @@
 the EVM watcher. Swaps are detected from per-mint token balance deltas (plus
 native SOL movement) in each confirmed transaction touching the wallet.
 
+IMPORTANT: fomo's co-signer acts as delegate, so most swap txs never reference
+the owner wallet — signatures must be collected per TOKEN ACCOUNT (ATA), not
+per wallet. We enumerate ATAs with getTokenAccountsByOwner and watch each,
+deduping tx signatures (a swap touches two ATAs).
+
 Writes into the same data/trades.jsonl + data/copy_trades.jsonl with
 chain="solana" so pnl_report.py can split PnL per chain.
 
@@ -20,6 +25,10 @@ from watcher import is_funding_token
 
 WSOL_MINT = "So11111111111111111111111111111111111111112"
 SOL_DUST_LAMPORTS = 1_000_000  # ignore <0.001 SOL native movement (rent noise)
+TOKEN_PROGRAMS = (
+    "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",  # SPL Token
+    "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",  # Token-2022
+)
 
 
 def sol_rpc(cfg, method, params):
@@ -27,12 +36,23 @@ def sol_rpc(cfg, method, params):
     return lib.rpc(cfg["solana"]["rpc"], method, params, retries=5)
 
 
-def fetch_signatures(cfg, until=None, limit=100):
-    """Newest-first [{signature, blockTime, err}] for the trader address."""
+def fetch_signatures(cfg, address, until=None, limit=100):
+    """Newest-first [{signature, blockTime, err}] for one address."""
     opts = {"limit": limit}
     if until:
         opts["until"] = until
-    return sol_rpc(cfg, "getSignaturesForAddress", [cfg["trader"]["solana_address"], opts]) or []
+    return sol_rpc(cfg, "getSignaturesForAddress", [address, opts]) or []
+
+
+def fetch_token_accounts(cfg):
+    """All of the trader's token-account (ATA) addresses across both programs."""
+    trader = cfg["trader"]["solana_address"]
+    accounts = []
+    for program in TOKEN_PROGRAMS:
+        res = sol_rpc(cfg, "getTokenAccountsByOwner",
+                      [trader, {"programId": program}, {"encoding": "jsonParsed"}])
+        accounts.extend(v["pubkey"] for v in (res or {}).get("value", []))
+    return accounts
 
 
 def fetch_tx(cfg, signature):
@@ -157,37 +177,73 @@ def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
     cfg = lib.load_config()
+    sol = cfg["solana"]
     d = lib.data_dir(cfg)
     state_file = d / "state_solana.json"
 
-    def save(sig):
-        state_file.write_text(json.dumps({"last_sig": sig}))
-
+    state = {"last_sigs": {}, "seen": []}
     if state_file.exists():
-        last_sig = json.loads(state_file.read_text())["last_sig"]
-    else:
-        last_sig = None
-        if "--no-backfill" not in sys.argv:
-            sigs = fetch_signatures(cfg, limit=cfg["solana"]["backfill_sigs"])
-            if sigs:
-                print(f"Backfilling {len(sigs)} signatures ...")
-                process_signatures(cfg, list(reversed(sigs)), backfill=True)
-                last_sig = sigs[0]["signature"]
-                print("Backfill done. Following live.")
-        if last_sig is None:
-            head = fetch_signatures(cfg, limit=1)
-            last_sig = head[0]["signature"] if head else None
-        save(last_sig)
+        state = json.loads(state_file.read_text())
+    seen = set(state["seen"])
+    last_sigs = state["last_sigs"]
 
-    print(f"Watching {cfg['trader']['solana_address']} on solana from {str(last_sig)[:12]}...")
+    def save():
+        state_file.write_text(json.dumps(
+            {"last_sigs": last_sigs, "seen": list(seen)[-5000:]}))
+
+    wallet = cfg["trader"]["solana_address"]
+    accounts = [wallet] + fetch_token_accounts(cfg)
+    print(f"Watching {len(accounts) - 1} token accounts + wallet on solana.")
+
+    if not last_sigs and "--no-backfill" not in sys.argv:
+        cutoff = time.time() - sol["backfill_days"] * 86400
+        batch = {}
+        for i, acct in enumerate(accounts):
+            for s in fetch_signatures(cfg, acct, limit=sol["backfill_sigs_per_account"]):
+                if s["signature"] not in batch:
+                    batch[s["signature"]] = s
+            head = fetch_signatures(cfg, acct, limit=1)
+            last_sigs[acct] = head[0]["signature"] if head else None
+            if (i + 1) % 10 == 0:
+                print(f"  scanned {i + 1}/{len(accounts)} accounts, {len(batch)} unique sigs")
+        recent = sorted((s for s in batch.values() if (s.get("blockTime") or 0) >= cutoff),
+                        key=lambda s: s["blockTime"])
+        print(f"Backfilling {len(recent)} sigs from the last {sol['backfill_days']}d "
+              f"({len(batch) - len(recent)} older skipped) ...")
+        process_signatures(cfg, recent, backfill=True)
+        seen.update(s["signature"] for s in batch.values())
+        save()
+        print("Backfill done. Following live.")
+    elif not last_sigs:
+        for acct in accounts:
+            head = fetch_signatures(cfg, acct, limit=1)
+            last_sigs[acct] = head[0]["signature"] if head else None
+        save()
+
+    cycles = 0
     while True:
-        time.sleep(cfg["solana"]["poll_seconds"])
+        time.sleep(sol["poll_seconds"])
+        cycles += 1
         try:
-            new = fetch_signatures(cfg, until=last_sig, limit=100)
-            if new:
-                process_signatures(cfg, list(reversed(new)))
-                last_sig = new[0]["signature"]
-                save(last_sig)
+            if cycles % 120 == 0:  # discover ATAs for newly bought tokens
+                for acct in fetch_token_accounts(cfg):
+                    if acct not in last_sigs:
+                        accounts.append(acct)
+                        last_sigs[acct] = None
+            batch = {}
+            for acct in list(last_sigs):
+                new = fetch_signatures(cfg, acct, until=last_sigs[acct],
+                                       limit=100 if last_sigs[acct] else 5)
+                if new:
+                    last_sigs[acct] = new[0]["signature"]
+                    for s in new:
+                        if s["signature"] not in seen and s["signature"] not in batch:
+                            batch[s["signature"]] = s
+            if batch:
+                fresh = sorted(batch.values(), key=lambda s: s.get("blockTime") or 0)
+                process_signatures(cfg, fresh)
+                seen.update(batch)
+                save()
         except KeyboardInterrupt:
             raise
         except Exception as e:

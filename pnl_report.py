@@ -67,6 +67,12 @@ def main():
         trader_vol = sum(r.get("trader_usd") or 0 for r in c_all)
         copy_vol = sum(r.get("copy_usd") or 0 for r in c_cop)
 
+        # per-chain window; p10 start dodges backfill stragglers from months back
+        times = sorted(r["block_time"] for r in c_all if r.get("block_time"))
+        w0, w1 = times[len(times) // 10], times[-1]
+        days = max((w1 - w0) / 86400, 1 / 24)
+        window_txt = f" over {days:.1f}d ({fmt(w0)}..{fmt(w1)}) = ${trader_vol / days:,.0f}/day"
+
         lats = sorted(r["latency_s"] for r in c_cop
                       if not r["backfill"] and r.get("latency_s") is not None)
         lat_txt = ""
@@ -97,7 +103,7 @@ def main():
         net = c_real + c_unreal
         grand_net += net
         print(f"--- {chain}: {len(c_cop)} copied / {c_skip} skipped, "
-              f"trader vol ${trader_vol:,.0f}, copied vol ${copy_vol:,.0f}{lat_txt}")
+              f"trader vol ${trader_vol:,.0f}{window_txt}, copied vol ${copy_vol:,.0f}{lat_txt}")
         for key, v in sorted(realized.items(), key=lambda kv: kv[1]):
             if key[0] == chain and abs(v) >= 0.01:
                 print(f"    realized {key[3]:12} {v:+10.2f} USD")
