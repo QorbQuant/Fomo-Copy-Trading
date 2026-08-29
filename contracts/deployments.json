@@ -4,10 +4,10 @@
     "rpc": "https://rpc.mainnet.chain.robinhood.com",
     "explorer": "https://robinhoodchain.blockscout.com",
     "deployer_executor": "0x27813048104759935DD6D505e8cddda1a5f4EFA1",
-    "vault": "",
-    "adapter": "",
-    "asset_USDG": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
-    "notes": "run DeployMainnet.s.sol once the deployer is funded, then fill vault/adapter"
+    "deployed_at": "2026-08-29",
+    "vault": "0x12b508A1883b910a537c25883AE7DB518c1511D9",
+    "adapter": "0x33D8BA2F03dCf1c7a3d519DC07c5B754Cb72d72E",
+    "asset_USDG": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"
   },
   "robinhood-testnet": {
     "chain_id": 46630,
