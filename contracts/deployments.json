@@ -1,0 +1,14 @@
+{
+  "robinhood-testnet": {
+    "chain_id": 46630,
+    "rpc": "https://rpc.testnet.chain.robinhood.com",
+    "explorer": "https://explorer.testnet.chain.robinhood.com",
+    "deployed_at": "2026-08-28",
+    "deployer_executor": "0x27813048104759935DD6D505e8cddda1a5f4EFA1",
+    "vault": "0xCF17a9794BDDD0c51F176F6A409601817906FfDa",
+    "mUSDC": "0x33D8BA2F03dCf1c7a3d519DC07c5B754Cb72d72E",
+    "mCHILL": "0x12b508A1883b910a537c25883AE7DB518c1511D9",
+    "mBOOMER": "0x2AE979dEDD5557abA4316Dd921974556748e8Bd9",
+    "router": "0xd048Fe99f21073977c2A957b5D278f264c9bc2fc"
+  }
+}
