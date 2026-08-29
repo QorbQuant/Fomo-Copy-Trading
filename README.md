@@ -58,9 +58,33 @@ prices and latency-drift bps vs the trader's implied execution price).
   liquidity heuristics; check `trades.jsonl` when something looks off.
 - Solana side is watch-only and currently not ingested at all.
 
-## Phase 2 (only if paper PnL is positive)
+## Phase 2: the vault contract (`contracts/`)
 
-`CopyVault.sol` — ERC-4626, executor-only `mirrorTrade()` through the Uniswap
-router on Robinhood Chain testnet (chain id 46630), on-chain guardrails: max %
-AUM per trade, max slippage bps, per-token cap, token allowlist, deposit
-epochs + withdrawal delay. See the plan file for full scope.
+`CopyVault.sol` — the pooled vault whose shares are the "vault token":
+
+- **Deposits** in one asset (USDC-style); shares priced off a keeper-posted
+  NAV with a freshness TTL (stale NAV blocks deposits, never exits).
+- **`mirrorTrade()`** — executor-only, one side must be the asset, buys capped
+  at `maxTradeBps` of NAV and restricted to an owner-set token allowlist,
+  `minOut` slippage bound, sells only of actually-held positions.
+- **In-kind redemption** — burning shares pays a pro-rata slice of the asset
+  and every held token, so exits never depend on NAV pricing (the main
+  NAV-manipulation surface is gone by construction). Plus a withdraw delay.
+
+No performance fees yet; executor/owner are fully trusted (prototype).
+
+```
+forge test --root contracts                    # 12 tests
+anvil &                                        # or use the Robinhood testnet
+forge script contracts/script/Demo.s.sol --root contracts \
+  --rpc-url http://127.0.0.1:8545 --private-key <key> --broadcast
+```
+
+Testnet (chain id 46630, RPC `https://rpc.testnet.chain.robinhood.com`,
+explorer `explorer.testnet.chain.robinhood.com`): throwaway deployer key in
+`contracts/.env` (gitignored); fund it at
+`https://faucet.testnet.chain.robinhood.com`, then run
+`script/Deploy.s.sol` with `--rpc-url $TESTNET_RPC`.
+
+Next: wire `copier.py` to send real `mirrorTrade()`/`postNav()` txs on the
+testnet instead of (as well as) logging.
