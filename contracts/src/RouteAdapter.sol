@@ -82,6 +82,7 @@ contract RouteAdapter is ICopyRouter {
         if (legs.length == 0) revert BadRoute();
         address expect = tokenIn;
         for (uint256 i = 0; i < legs.length; i++) {
+            if (legs[i].kind > 1) revert BadRoute();
             if (_legInput(legs[i]) != expect) revert BadRoute();
             expect = _legOutput(legs[i]);
             if (legs[i].kind == 1) {
@@ -95,6 +96,13 @@ contract RouteAdapter is ICopyRouter {
         }
         if (expect != tokenOut) revert BadRoute();
         routeBlobs[tokenIn][tokenOut] = abi.encode(legs);
+    }
+
+    /// The adapter should hold no balance between swaps; this recovers dust
+    /// from partial fills or accidental transfers.
+    function sweep(address token, address to) external {
+        if (msg.sender != owner) revert NotOwner();
+        require(IERC20(token).transfer(to, IERC20(token).balanceOf(address(this))), "sweep");
     }
 
     function routeLength(address tokenIn, address tokenOut) external view returns (uint256) {

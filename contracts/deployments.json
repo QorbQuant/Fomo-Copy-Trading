@@ -7,7 +7,8 @@
     "deployed_at": "2026-08-29",
     "vault": "0x12b508A1883b910a537c25883AE7DB518c1511D9",
     "adapter": "0x33D8BA2F03dCf1c7a3d519DC07c5B754Cb72d72E",
-    "asset_USDG": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"
+    "asset_USDG": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+    "route_adapter": "0x13c2aeD11ec90f6B8b5Ca8D7Ae1050C2e55195fD"
   },
   "robinhood-testnet": {
     "chain_id": 46630,
