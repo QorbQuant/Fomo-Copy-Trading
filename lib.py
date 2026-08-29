@@ -129,12 +129,14 @@ PRICE_TTL = 20
 
 
 def token_price_info(token, chain_slug):
-    """{"price": usd or None, "liquidity": usd} from the deepest dexscreener pair on this chain."""
-    token = token.lower()
+    """{"price": usd or None, "liquidity": usd, "symbol": str or None} from the
+    deepest dexscreener pair on this chain. Solana mints are case-sensitive, so
+    only EVM addresses are lowercased."""
+    key = token.lower() if token.startswith("0x") else token
     now = time.time()
-    if token in _price_cache and now - _price_cache[token][0] < PRICE_TTL:
-        return _price_cache[token][1]
-    info = {"price": None, "liquidity": 0.0}
+    if key in _price_cache and now - _price_cache[key][0] < PRICE_TTL:
+        return _price_cache[key][1]
+    info = {"price": None, "liquidity": 0.0, "symbol": None}
     try:
         r = _session.get(f"https://api.dexscreener.com/latest/dex/tokens/{token}", timeout=15)
         r.raise_for_status()
@@ -142,22 +144,29 @@ def token_price_info(token, chain_slug):
         best = None
         for p in pairs:
             liq = (p.get("liquidity") or {}).get("usd") or 0
-            px = None
-            if p.get("baseToken", {}).get("address", "").lower() == token:
-                px = p.get("priceUsd")
-            elif p.get("quoteToken", {}).get("address", "").lower() == token and p.get("priceUsd") and p.get("priceNative"):
+            base = p.get("baseToken", {})
+            quote = p.get("quoteToken", {})
+            px, sym = None, None
+            if _addr_eq(base.get("address", ""), token):
+                px, sym = p.get("priceUsd"), base.get("symbol")
+            elif _addr_eq(quote.get("address", ""), token) and p.get("priceUsd") and p.get("priceNative"):
+                sym = quote.get("symbol")
                 try:  # price of quote token = priceUsd / priceNative
                     px = float(p["priceUsd"]) / float(p["priceNative"])
                 except (ValueError, ZeroDivisionError):
                     px = None
             if px is not None and (best is None or liq > best[0]):
-                best = (liq, float(px))
+                best = (liq, float(px), sym)
         if best:
-            info = {"price": best[1], "liquidity": best[0]}
+            info = {"price": best[1], "liquidity": best[0], "symbol": best[2]}
     except requests.RequestException:
         pass
-    _price_cache[token] = (now, info)
+    _price_cache[key] = (now, info)
     return info
+
+
+def _addr_eq(a, b):
+    return a.lower() == b.lower() if b.startswith("0x") else a == b
 
 
 def price_usd(token, chain_slug):

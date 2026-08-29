@@ -19,7 +19,7 @@ import lib
 
 # One-sided transfers of quote-class tokens are funding/bridging (top-ups,
 # Relay settlement legs), not trades to copy.
-FUNDING_SYMBOLS = {"WETH", "ETH", "USDC", "USDT", "USDG", "DAI"}
+FUNDING_SYMBOLS = {"WETH", "ETH", "USDC", "USDT", "USDG", "DAI", "SOL", "WSOL"}
 
 
 def is_funding_token(leg):
@@ -63,6 +63,7 @@ def normalize_tx(cfg, tx_hash, logs, detected_at, backfill):
     block = int(logs[0]["blockNumber"], 16)
     block_time = lib.block_timestamp(rpc_url, logs[0]["blockNumber"])
     base = {
+        "chain": "robinhood", "dex_chain": chain_slug,
         "tx_hash": tx_hash, "block": block, "block_time": block_time,
         "detected_at": round(detected_at, 3), "backfill": backfill,
         "latency_s": None if backfill else round(detected_at - block_time, 3),

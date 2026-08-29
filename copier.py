@@ -29,9 +29,10 @@ def plan_copy(cfg, trade, out_path):
     # Fill model: the asset leg's dexscreener price at detection time.
     # Latency cost = detection price vs the trader's implied execution price.
     asset = trade["asset_token"]
+    dex_chain = trade.get("dex_chain") or cfg["chain"]["dexscreener_chain_id"]
     detection_price = None
     if not trade.get("backfill"):
-        detection_price = lib.price_usd(asset["address"], cfg["chain"]["dexscreener_chain_id"])
+        detection_price = lib.price_usd(asset["address"], dex_chain)
     fill_price = detection_price or asset.get("implied_price_usd")
 
     slippage_bps = None
@@ -60,6 +61,8 @@ def plan_copy(cfg, trade, out_path):
 
 def _base(trade):
     return {
+        "chain": trade.get("chain", "robinhood"),
+        "dex_chain": trade.get("dex_chain", "robinhood"),
         "tx_hash": trade["tx_hash"],
         "block": trade["block"],
         "block_time": trade["block_time"],

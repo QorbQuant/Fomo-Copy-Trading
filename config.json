@@ -18,6 +18,13 @@
     "min_copy_usd": 10,
     "max_slippage_bps": 150
   },
+  "solana": {
+    "rpc": "https://api.mainnet-beta.solana.com",
+    "dexscreener_chain_id": "solana",
+    "backfill_sigs": 400,
+    "poll_seconds": 5,
+    "rpc_pause": 0.15
+  },
   "watcher": {
     "poll_seconds": 3,
     "backfill_blocks": 900000,
