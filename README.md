@@ -47,6 +47,15 @@ Outputs in `data/`: `trades.jsonl` (normalized trader activity),
 `copy_trades.jsonl` (what the vault would have done, with detection-time fill
 prices and latency-drift bps vs the trader's implied execution price).
 
+## Chain split (measured 2026-08-29, 3-day window)
+
+`solana_watcher.py` watches the trader's ~52 Solana token accounts (fomo's
+co-signer is a delegate, so wallet-level signature queries miss most swaps —
+signatures must be collected per ATA and deduped). Result: **~$33.5K/day
+copyable volume on Robinhood Chain vs ~$1K/day on Solana (~97/3)** for this
+trader. A cross-chain Solana sleeve is not worth building at this split;
+re-check `pnl_report.py` after a week of live data.
+
 ## Known limitations (deliberate, prototype)
 
 - Backfilled trades use the trader's implied price as the fill — no latency
