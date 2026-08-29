@@ -116,5 +116,14 @@ explorer `explorer.testnet.chain.robinhood.com`): throwaway deployer key in
 `https://faucet.testnet.chain.robinhood.com`, then run
 `script/Deploy.s.sol` with `--rpc-url $TESTNET_RPC`.
 
-Next: wire `copier.py` to send real `mirrorTrade()`/`postNav()` txs on the
-testnet instead of (as well as) logging.
+**The loop is closed by `executor.py`**: it tails `data/copy_trades.jsonl`
+and, for each live Robinhood Chain copy signal (≤10 min old), deploys a
+testnet mock for any unseen token (allowlisting it and pinning the mock
+router's rate to the real token's live price), posts NAV computed from actual
+on-chain holdings, sizes against on-chain NAV, and sends `mirrorTrade()` with
+the keeper key. Executions land in `data/executions.jsonl`.
+
+```
+python executor.py --test   # inject one synthetic buy, then follow live
+python executor.py          # follow live signals
+```
