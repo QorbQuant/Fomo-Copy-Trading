@@ -74,7 +74,8 @@ E = env()
 def run(cmd):
     p = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     if p.returncode != 0:
-        raise RuntimeError(f"{' '.join(cmd[:3])}...: {p.stderr.strip()[:300]}")
+        detail = (p.stderr.strip() or p.stdout.strip())[:400]
+        raise RuntimeError(f"{' '.join(cmd[:3])}...: {detail}")
     return p.stdout.strip()
 
 
@@ -478,6 +479,16 @@ class Executor:
         Temporarily points sleeveTakeToken at the target mint (owner action),
         then restores it to USDC. Receiver/cap guarantees unchanged."""
         import base58
+        # on-chain sleeve cap: cumulative funding <= capBps of posted NAV
+        cap_bps = uint(self.call(self.dep["vault"], "sleeveCapBps()(uint256)"))
+        total_nav = uint(self.call(self.dep["vault"], "totalNavAsset()(uint256)")) / 1e6
+        funded = uint(self.call(self.dep["vault"], "sleeveFundedAsset()(uint256)")) / 1e6
+        headroom = total_nav * cap_bps / 10_000 - funded
+        if usd > headroom:
+            raise RuntimeError(
+                f"${usd:,.2f} exceeds sleeve cap headroom ${headroom:,.2f} "
+                f"({cap_bps / 100:.0f}% of NAV ${total_nav:,.2f} minus ${funded:,.2f} already "
+                f"funded) — reduce the amount or raise the cap via setSleeve")
         quote_raw, dec = self.debridge_quote(usd, mint_b58)
         if not quote_raw:
             raise RuntimeError(f"no DLN solver market for {symbol}")
