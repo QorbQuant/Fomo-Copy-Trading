@@ -12,6 +12,11 @@
     "solana_address": "H2QSGECp13sFLJgdTsDtayX3dk18Dm6sQMSQKcew7Xzk",
     "ref_capital_usd": 1800000
   },
+  "sleeve": {
+    "auto_bridge": false,
+    "buffer_pct": 5,
+    "min_bridge_usd": 3
+  },
   "vault": {
     "aum_usd": 100000,
     "max_trade_pct": 0.05,

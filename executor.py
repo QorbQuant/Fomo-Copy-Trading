@@ -412,7 +412,44 @@ class Executor:
         (lib.data_dir(self.cfg) / "nav.json").write_text(
             json.dumps({"nav_usd": nav, "ts": time.time()}))
         print(f"  [exec] posted NAV ${nav:,.2f}")
+        try:
+            self.maybe_fund_sleeve(nav)
+        except Exception as e:
+            print(f"  [exec warn] sleeve bridge check failed: {e}")
         return nav
+
+    def sleeve_configured(self):
+        if getattr(self, "_sleeve_ok", None) is None:
+            recv = self.call(self.dep["vault"], "sleeveReceiver()(bytes)").strip()
+            self._sleeve_ok = len(recv.replace("0x", "")) == 64
+        return self._sleeve_ok
+
+    def maybe_fund_sleeve(self, nav):
+        """Keep the sleeve's USDC buffer topped up via a vault-created DLN
+        order (receiver pinned on-chain). Runs on the NAV cadence."""
+        scfg = self.cfg.get("sleeve", {})
+        if not (self.mainnet and scfg.get("auto_bridge") and self.sleeve_configured()):
+            return
+        import sleeve as sleeve_mod
+        pub = sleeve_mod._env().get("SLEEVE_SOLANA_PUBKEY")
+        if not pub:
+            return
+        cash, _ = sleeve_mod.token_balance(self.cfg, pub, sleeve_mod.USDC_MINT)
+        target = nav * scfg.get("buffer_pct", 5) / 100
+        if cash >= target * 0.6:
+            return
+        vault_cash = uint(self.call(self.asset_addr(), "balanceOf(address)(uint256)",
+                                    self.dep["vault"])) / 1e6
+        amount = min(target - cash, max(vault_cash - 1, 0))
+        if amount < scfg.get("min_bridge_usd", 3):
+            return
+        fee = uint(self.call("0xeF4fB24aD0916217251F553c0596F8Edc630EB66",
+                             "globalFixedNativeFee()(uint88)"))
+        tx = self.send(self.dep["vault"], "fundSleeve(uint256,uint256)",
+                       int(amount * 1e6), int(amount * 0.97 * 1e6), value=str(fee))
+        lib.append_jsonl(self.exec_log, {"ts": round(time.time(), 3), "kind": "bridge",
+                                         "usd": round(amount, 2), "vault_tx": tx})
+        print(f"  [exec] bridging ${amount:,.2f} USDG -> sleeve via DLN: {tx}")
 
     # ------------------------------------------------------------ trades
 
@@ -453,8 +490,20 @@ class Executor:
                            asset, tok["addr"], amount_in, min_out)
         else:
             bal = uint(self.call(tok["addr"], "balanceOf(address)(uint256)", self.dep["vault"]))
-            amount_in = min(bal, int(usd / price * 10 ** tok["decimals"]))
-            if amount_in == 0:
+            if self.mainnet and rec.get("trader_amount"):
+                # mirror the FRACTION of the position the trader sold — a full
+                # exit mirrors as a full exit (sells have no on-chain cap)
+                remaining = uint(self.call(tok["addr"], "balanceOf(address)(uint256)",
+                                           self.cfg["trader"]["evm_address"])) / 10 ** tok["decimals"]
+                sold = rec["trader_amount"]
+                frac = sold / (sold + remaining) if sold + remaining > 0 else 0
+                if frac >= 0.95:
+                    frac = 1.0
+                amount_in = int(bal * frac)
+                usd = amount_in / 10 ** tok["decimals"] * price
+            else:
+                amount_in = min(bal, int(usd / price * 10 ** tok["decimals"]))
+            if amount_in == 0 or (usd < 0.25 and amount_in < bal):
                 return
             if self.mainnet:
                 min_out = self.min_out(tok, "sell", amount_in)

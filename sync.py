@@ -12,12 +12,14 @@ prices before each clip. Idempotent: run again any time to correct drift.
     python sync.py --dry-run  # print the plan only
 """
 
+import os
 import sys
 import time
 
 import requests
 
 import lib
+import sleeve as sleeve_mod
 from executor import DEPLOY, Executor, cast_call, cast_send, uint
 from watcher import is_funding_token
 
@@ -64,7 +66,39 @@ def fetch_trader_portfolio(cfg):
             excluded.append({"addr": taddr, "symbol": symbol, "usd": usd,
                              "liquidity": info["liquidity"]})
             continue
-        positions.append({"addr": taddr, "symbol": symbol, "usd": usd, "price": info["price"]})
+        positions.append({"addr": taddr, "symbol": symbol, "usd": usd, "price": info["price"],
+                          "chain": "robinhood"})
+
+    # Solana side of the book: same anti-poisoning filters
+    sol_addr = cfg["trader"]["solana_address"]
+    for program in sleeve_mod.TOKEN_PROGRAMS:
+        res = lib.rpc(cfg["solana"]["rpc"], "getTokenAccountsByOwner",
+                      [sol_addr, {"programId": program}, {"encoding": "jsonParsed"}])
+        for v in (res or {}).get("value", []):
+            tinfo = v["account"]["data"]["parsed"]["info"]
+            amt = float(tinfo["tokenAmount"]["uiAmount"] or 0)
+            if amt == 0:
+                continue
+            mint = tinfo["mint"]
+            if mint == sleeve_mod.USDC_MINT:
+                cash += amt
+                continue
+            info = lib.token_price_info(mint, "solana")
+            if not info["price"]:
+                continue
+            usd = amt * info["price"]
+            symbol = info["symbol"] or mint[:6]
+            if (info["liquidity"] < MIN_BOOK_LIQUIDITY
+                    or usd > info["liquidity"] * MAX_POSITION_VS_LIQUIDITY):
+                excluded.append({"addr": mint, "symbol": symbol, "usd": usd,
+                                 "liquidity": info["liquidity"]})
+                continue
+            positions.append({"addr": mint, "symbol": symbol, "usd": usd,
+                              "price": info["price"], "chain": "solana",
+                              "decimals": tinfo["tokenAmount"]["decimals"]})
+    cash += sleeve_mod.sol_balance(cfg, sol_addr) * (
+        lib.price_usd("So11111111111111111111111111111111111111112", "solana") or 0)
+
     total = cash + sum(p["usd"] for p in positions)
     return positions, cash, total, excluded
 
@@ -95,14 +129,21 @@ def main():
             print(f"  [excluded] {e['symbol']:12} claims ${e['usd']:,.0f} but pool depth is "
                   f"${e['liquidity']:,.0f} — airdrop/clone, not counted")
 
+    sleeve_pub = sleeve_mod._env().get("SLEEVE_SOLANA_PUBKEY")
+
+    def current_usd(p):
+        if p.get("chain") == "solana":
+            held, _ = sleeve_mod.token_balance(cfg, sleeve_pub, p["addr"]) if sleeve_pub else (0, None)
+            return held * p["price"]
+        return vault_position_usd(ex, p["addr"], p["price"])
+
     plan = []
     for p in positions:
         weight = p["usd"] / total
         if weight < MIN_WEIGHT:
             continue
         target = nav * weight
-        current = vault_position_usd(ex, p["addr"], p["price"])
-        delta = target - current
+        delta = target - current_usd(p)
         if abs(delta) >= MIN_CLIP_USD:
             plan.append({**p, "weight": weight, "target": target, "delta": delta})
 
@@ -119,18 +160,76 @@ def main():
         if held >= MIN_CLIP_USD:
             plan.append({"addr": addr, "symbol": info["symbol"] or addr[:8], "usd": 0,
                          "price": info["price"], "weight": weights.get(addr, 0),
-                         "target": 0.0, "delta": -held})
+                         "target": 0.0, "delta": -held, "chain": "robinhood"})
+    # sleeve orphans
+    if sleeve_pub:
+        for program in sleeve_mod.TOKEN_PROGRAMS:
+            res = lib.rpc(cfg["solana"]["rpc"], "getTokenAccountsByOwner",
+                          [sleeve_pub, {"programId": program}, {"encoding": "jsonParsed"}])
+            for v in (res or {}).get("value", []):
+                tinfo = v["account"]["data"]["parsed"]["info"]
+                amt = float(tinfo["tokenAmount"]["uiAmount"] or 0)
+                mint = tinfo["mint"]
+                if amt == 0 or mint == sleeve_mod.USDC_MINT or mint in planned \
+                        or weights.get(mint, 0) >= MIN_WEIGHT:
+                    continue
+                info = lib.token_price_info(mint, "solana")
+                held = amt * (info["price"] or 0)
+                if held >= MIN_CLIP_USD:
+                    plan.append({"addr": mint, "symbol": info["symbol"] or mint[:6], "usd": 0,
+                                 "price": info["price"], "weight": 0.0, "target": 0.0,
+                                 "delta": -held, "chain": "solana",
+                                 "decimals": tinfo["tokenAmount"]["decimals"]})
 
     for p in plan:
-        print(f"  {p['symbol']:12} weight {p['weight']*100:5.1f}%  target ${p['target']:8,.2f}  "
+        print(f"  {p['symbol']:12} [{p.get('chain', 'robinhood'):9}] weight {p['weight']*100:5.1f}%  "
+              f"target ${p['target']:8,.2f}  "
               f"{'BUY' if p['delta'] > 0 else 'SELL'} ${abs(p['delta']):,.2f}"
               + ("  (trader exited)" if p["target"] == 0 else ""))
     if dry:
         return
 
+    # ---------------- Solana legs: bridge if short, then rebalance the sleeve
+    sol_plan = [p for p in plan if p.get("chain") == "solana"]
+    if sol_plan and ex.mainnet:
+        os.environ["SLEEVE_EXECUTE"] = "1"  # user invoked sync = consent
+        buy_need = sum(p["delta"] for p in sol_plan if p["delta"] > 0)
+        cash, _ = sleeve_mod.token_balance(cfg, sleeve_pub, sleeve_mod.USDC_MINT)
+        shortfall = buy_need + 1 - cash
+        if shortfall > cfg["sleeve"].get("min_bridge_usd", 3):
+            if ex.sleeve_configured():
+                fee = uint(ex.call("0xeF4fB24aD0916217251F553c0596F8Edc630EB66",
+                                   "globalFixedNativeFee()(uint88)"))
+                tx = ex.send(ex.dep["vault"], "fundSleeve(uint256,uint256)",
+                             int(shortfall * 1e6), int(shortfall * 0.97 * 1e6), value=str(fee))
+                print(f"  [sync] bridging ${shortfall:,.2f} to sleeve via DLN {tx[:14]} — waiting for fill...")
+                t0 = time.time()
+                while time.time() - t0 < 300:
+                    time.sleep(10)
+                    now_cash, _ = sleeve_mod.token_balance(cfg, sleeve_pub, sleeve_mod.USDC_MINT)
+                    if now_cash > cash + shortfall * 0.5:
+                        print(f"  [sync] sleeve funded: ${now_cash:,.2f} USDC")
+                        break
+                else:
+                    print("  [sync] DLN fill not seen in 5min — buys will partial-fill; "
+                          "funds are escrowed in the order, check later")
+            else:
+                print(f"  [sync] sleeve needs ${shortfall:,.2f} more USDC but vault sleeve "
+                      "is not configured — buys will partial-fill")
+        for p in sorted(sol_plan, key=lambda p: p["delta"]):  # sells first, frees cash
+            fill = sleeve_mod.rebalance_position(cfg, p["addr"], p["symbol"], p["delta"],
+                                                 p["price"], p.get("decimals"))
+            ok = fill and fill.get("executed")
+            print(f"  [sync] sleeve {'ok' if ok else 'SKIP'} "
+                  f"{'buy' if p['delta'] > 0 else 'sell'} ${abs(p['delta']):,.2f} {p['symbol']}"
+                  + (f" ({fill.get('skip_reason')})" if fill and not ok else ""))
+
+    # ---------------- Robinhood Chain legs (vault mirrorTrade clips)
     clip_cap = nav * CLIP_FRACTION
     asset = ex.asset_addr()
     for p in plan:
+        if p.get("chain") == "solana":
+            continue
         try:
             tok = ex.ensure_token(p["addr"], p["symbol"], p["price"])
         except RuntimeError as e:

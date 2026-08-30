@@ -168,6 +168,29 @@ def handle_copy(cfg, trade, rec):
     }
     if quote and _env().get("SLEEVE_EXECUTE") == "1":
         exec_quote, note = quote, None
+        if rec["tx_hash"] != "SLEEVE-TEST" and rec["side"] == "sell":
+            # mirror the fraction of the position the trader sold; a full
+            # exit sells the sleeve's whole position
+            pub = _env().get("SLEEVE_SOLANA_PUBKEY")
+            held, hdec = token_balance(cfg, pub, mint) if pub else (0, None)
+            if held <= 0 or hdec is None:
+                fill["executed"] = False
+                fill["skip_reason"] = "sleeve holds none"
+                lib.append_jsonl(lib.data_dir(cfg) / "sleeve_fills.jsonl", fill)
+                return fill
+            remaining, _ = token_balance(cfg, cfg["trader"]["solana_address"], mint)
+            sold = rec.get("trader_amount") or 0
+            frac = sold / (sold + remaining) if sold + remaining > 0 else 0
+            if frac >= 0.95:
+                frac = 1.0
+            sell_amt = held * frac
+            if sell_amt * (rec.get("detection_price_usd") or 0) < 0.25 and frac < 1.0:
+                fill["executed"] = False
+                fill["skip_reason"] = "sell below min"
+                lib.append_jsonl(lib.data_dir(cfg) / "sleeve_fills.jsonl", fill)
+                return fill
+            note = f"selling {frac*100:.0f}% of sleeve position"
+            exec_quote = jupiter_quote(mint, USDC_MINT, sell_amt * 10 ** hdec)
         if rec["tx_hash"] != "SLEEVE-TEST" and rec["side"] == "buy":
             # size against REAL combined NAV, not the paper AUM the copier
             # used; cap at sleeve cash (partial fill beats a failed swap)
@@ -239,6 +262,38 @@ def _execute(cfg, quote):
     except Exception as e:
         print(f"  [sleeve] execution failed: {e}")
     return None
+
+
+def rebalance_position(cfg, mint, symbol, delta_usd, price, decimals):
+    """Sync's convergence primitive: move the sleeve's position in `mint` by
+    delta_usd (buy if positive, sell if negative) through Jupiter. Returns a
+    fill dict (executed flag included). Caller ensures SLEEVE_EXECUTE consent.
+    """
+    pub = _env().get("SLEEVE_SOLANA_PUBKEY")
+    if not pub:
+        return None
+    if delta_usd > 0:
+        cash, _ = token_balance(cfg, pub, USDC_MINT)
+        usd = min(delta_usd, max(cash - 1.0, 0))
+        if usd < 1:
+            return {"executed": False, "skip_reason": f"sleeve cash ${cash:.2f}"}
+        quote = jupiter_quote(USDC_MINT, mint, usd * 1e6)
+    else:
+        held, hdec = token_balance(cfg, pub, mint)
+        if held <= 0:
+            return {"executed": False, "skip_reason": "nothing held"}
+        amt = min(held, abs(delta_usd) / price if price else held)
+        if abs(delta_usd) >= held * (price or 0) * 0.95:
+            amt = held  # near-full target reduction: exit cleanly
+        quote = jupiter_quote(mint, USDC_MINT, amt * 10 ** (hdec or decimals or 9))
+    if not quote:
+        return {"executed": False, "skip_reason": "no jupiter route"}
+    sig = _execute(cfg, quote)
+    fill = {"tx_hash": "SYNC", "side": "buy" if delta_usd > 0 else "sell", "mint": mint,
+            "symbol": symbol, "usd": round(abs(delta_usd), 2), "executed": sig is not None,
+            "sleeve_sig": sig, "quoted_at": round(time.time(), 3)}
+    lib.append_jsonl(lib.data_dir(cfg) / "sleeve_fills.jsonl", fill)
+    return fill
 
 
 def main():

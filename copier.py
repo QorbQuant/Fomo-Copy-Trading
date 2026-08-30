@@ -50,6 +50,7 @@ def plan_copy(cfg, trade, out_path):
         "asset_symbol": asset["symbol"],
         "asset_address": asset["address"],
         "asset_decimals": asset.get("decimals"),
+        "trader_amount": asset.get("amount"),
         "trader_implied_price_usd": asset.get("implied_price_usd"),
         "detection_price_usd": detection_price,
         "fill_price_usd": fill_price,
