@@ -13,7 +13,7 @@
     "ref_capital_usd": 1800000
   },
   "sleeve": {
-    "auto_bridge": false,
+    "auto_bridge": true,
     "buffer_pct": 5,
     "min_bridge_usd": 200,
     "rotation_bridge_min_usd": 200

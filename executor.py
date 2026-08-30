@@ -681,6 +681,40 @@ def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
     ex = _default()
+    if "--rotate" in sys.argv:
+        # manual rotation-bridge test: --rotate <solana_mint_b58> <usd>
+        i = sys.argv.index("--rotate")
+        mint, usd = sys.argv[i + 1], float(sys.argv[i + 2])
+        if not ex.mainnet:
+            raise SystemExit("--rotate needs --mainnet")
+        import sleeve as sleeve_mod
+        info = lib.token_price_info(mint, "solana")
+        symbol = info["symbol"] or mint[:6]
+        vault_cash = uint(ex.call(ex.asset_addr(), "balanceOf(address)(uint256)",
+                                  ex.dep["vault"])) / 1e6
+        if vault_cash < usd + 1:
+            raise SystemExit(f"vault holds ${vault_cash:,.2f} USDG loose — deposit more first")
+        if usd < 200:
+            print(f"WARNING: ${usd:.0f} is below the $200 fee-efficiency floor")
+        if ex.bridge_pending_usd() > 0:
+            raise SystemExit("a bridge order is already in flight")
+        pub = sleeve_mod._env().get("SLEEVE_SOLANA_PUBKEY")
+        before, _ = sleeve_mod.token_balance(ex.cfg, pub, mint)
+        ex.post_nav(force=True)
+        ex.bridge_and_buy(mint, symbol, usd)
+        print("waiting for solver fill (up to 5 min)...")
+        t0 = time.time()
+        while time.time() - t0 < 300:
+            time.sleep(10)
+            now, _ = sleeve_mod.token_balance(ex.cfg, pub, mint)
+            if now > before:
+                print(f"FILLED: sleeve received {now - before:,.2f} {symbol} "
+                      f"(~${(now - before) * (info['price'] or 0):,.2f})")
+                break
+        else:
+            print("no fill seen in 5 min — order stays open in DLN escrow, "
+                  "tracked in bridge_pending.json; check again later")
+        return
     if "--test" in sys.argv and not ex.mainnet:
         chill = "0xbbf2c91fdcc488ba736e0c38adc82c9a92597deb"
         price = lib.price_usd(chill, ex.cfg["chain"]["dexscreener_chain_id"])
