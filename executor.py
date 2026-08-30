@@ -379,7 +379,18 @@ class Executor:
 
     def compute_nav_usd(self):
         nav = uint(self.call(self.asset_addr(), "balanceOf(address)(uint256)", self.dep["vault"])) / 1e6
-        nav += uint(self.call(self.dep["vault"], "sleeveFundedAsset()(uint256)")) / 1e6
+        if self.mainnet:
+            # value the sleeve wallet directly (cash + positions + SOL);
+            # the on-chain sleeveFundedAsset counter is only the cap tracker
+            import sleeve as sleeve_mod
+            pub = sleeve_mod._env().get("SLEEVE_SOLANA_PUBKEY")
+            if pub:
+                try:
+                    nav += sleeve_mod.sleeve_value_usd(self.cfg, pub)
+                except Exception as e:
+                    print(f"  [exec warn] sleeve valuation failed, NAV excludes sleeve: {e}")
+        else:
+            nav += uint(self.call(self.dep["vault"], "sleeveFundedAsset()(uint256)")) / 1e6
         for real_addr, tok in self.state["token_map"].items():
             bal = uint(self.call(tok["addr"], "balanceOf(address)(uint256)",
                                  self.dep["vault"])) / 10 ** tok["decimals"]
@@ -397,6 +408,9 @@ class Executor:
         self.send(self.dep["vault"], "postNav(uint256)", int(nav * 1e6))
         self.state["last_nav_post"] = time.time()
         self.save()
+        # shared with sleeve.py for live sizing of Solana copies
+        (lib.data_dir(self.cfg) / "nav.json").write_text(
+            json.dumps({"nav_usd": nav, "ts": time.time()}))
         print(f"  [exec] posted NAV ${nav:,.2f}")
         return nav
 

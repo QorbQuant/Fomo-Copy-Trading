@@ -34,19 +34,59 @@ def _sol(cfg, method, params):
     return lib.rpc(cfg["solana"]["rpc"], method, params, retries=5)
 
 
+TOKEN_PROGRAMS = (
+    "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+    "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+)
+
+
 def sol_balance(cfg, pubkey):
-    return ((_sol(cfg, "getBalance", [pubkey]) or {}).get("value") or 0) / 1e9
+    return ((_sol(cfg, "getBalance", [pubkey, {"commitment": "confirmed"}]) or {}).get("value") or 0) / 1e9
 
 
 def token_balance(cfg, owner, mint):
     """-> (ui_amount, decimals or None)"""
-    res = _sol(cfg, "getTokenAccountsByOwner", [owner, {"mint": mint}, {"encoding": "jsonParsed"}])
+    res = _sol(cfg, "getTokenAccountsByOwner",
+               [owner, {"mint": mint}, {"encoding": "jsonParsed", "commitment": "confirmed"}])
     total, dec = 0.0, None
     for v in (res or {}).get("value", []):
         ta = v["account"]["data"]["parsed"]["info"]["tokenAmount"]
         total += float(ta["uiAmount"] or 0)
         dec = ta["decimals"]
     return total, dec
+
+
+def sleeve_value_usd(cfg, pubkey):
+    """Total sleeve value: USDC + SOL + every token position, dexscreener-priced."""
+    total = sol_balance(cfg, pubkey) * (lib.price_usd(
+        "So11111111111111111111111111111111111111112", "solana") or 0)
+    for program in TOKEN_PROGRAMS:
+        res = _sol(cfg, "getTokenAccountsByOwner",
+                   [pubkey, {"programId": program},
+                    {"encoding": "jsonParsed", "commitment": "confirmed"}])
+        for v in (res or {}).get("value", []):
+            info = v["account"]["data"]["parsed"]["info"]
+            amt = float(info["tokenAmount"]["uiAmount"] or 0)
+            if amt == 0:
+                continue
+            mint = info["mint"]
+            price = 1.0 if mint == USDC_MINT else (lib.price_usd(mint, "solana") or 0)
+            total += amt * price
+    return total
+
+
+def _read_vault_nav(cfg, max_age_s=900):
+    """Last NAV the executor posted (written to data/nav.json); None if stale."""
+    p = lib.data_dir(cfg) / "nav.json"
+    if not p.exists():
+        return None
+    try:
+        d = json.loads(p.read_text())
+        if time.time() - d["ts"] > max_age_s:
+            return None
+        return d["nav_usd"]
+    except (ValueError, KeyError):
+        return None
 
 
 def mint_decimals(cfg, mint):
@@ -127,7 +167,34 @@ def handle_copy(cfg, trade, rec):
         "executed": False,
     }
     if quote and _env().get("SLEEVE_EXECUTE") == "1":
-        sig = _execute(cfg, quote)
+        exec_quote, note = quote, None
+        if rec["tx_hash"] != "SLEEVE-TEST" and rec["side"] == "buy":
+            # size against REAL combined NAV, not the paper AUM the copier
+            # used; cap at sleeve cash (partial fill beats a failed swap)
+            nav = _read_vault_nav(cfg)
+            pub = _env().get("SLEEVE_SOLANA_PUBKEY")
+            if nav is None or not pub:
+                fill["executed"] = False
+                fill["skip_reason"] = "no fresh NAV for live sizing"
+                lib.append_jsonl(lib.data_dir(cfg) / "sleeve_fills.jsonl", fill)
+                return fill
+            fraction = min((rec.get("trader_usd") or 0) / cfg["trader"]["ref_capital_usd"], 0.049)
+            want = nav * fraction
+            cash, _ = token_balance(cfg, pub, USDC_MINT)
+            exec_usd = min(want, max(cash - 1.0, 0))
+            fill["exec_usd"], fill["exec_want_usd"] = round(exec_usd, 2), round(want, 2)
+            if exec_usd < 1:
+                fill["executed"] = False
+                fill["skip_reason"] = f"sleeve cash ${cash:.2f} below min"
+                lib.append_jsonl(lib.data_dir(cfg) / "sleeve_fills.jsonl", fill)
+                return fill
+            if exec_usd < want:
+                note = f"partial fill: wanted ${want:,.2f}, sleeve cash allows ${exec_usd:,.2f}"
+            exec_quote = jupiter_quote(USDC_MINT, mint, exec_usd * 1e6)
+        if note:
+            print(f"  [sleeve] {note}")
+            fill["note"] = note
+        sig = _execute(cfg, exec_quote) if exec_quote else None
         fill["executed"] = sig is not None
         fill["sleeve_sig"] = sig
     lib.append_jsonl(lib.data_dir(cfg) / "sleeve_fills.jsonl", fill)

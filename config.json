@@ -10,7 +10,7 @@
     "handle": "AvgJoesCrypto",
     "evm_address": "0x06de9c48b1e639ed5c13ec8fbd4080a38e39f2d1",
     "solana_address": "H2QSGECp13sFLJgdTsDtayX3dk18Dm6sQMSQKcew7Xzk",
-    "ref_capital_usd": 900000
+    "ref_capital_usd": 1800000
   },
   "vault": {
     "aum_usd": 100000,
