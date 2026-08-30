@@ -389,6 +389,7 @@ class Executor:
                     nav += sleeve_mod.sleeve_value_usd(self.cfg, pub)
                 except Exception as e:
                     print(f"  [exec warn] sleeve valuation failed, NAV excludes sleeve: {e}")
+            nav += self.bridge_pending_usd()  # in-flight DLN escrow is still vault value
         else:
             nav += uint(self.call(self.dep["vault"], "sleeveFundedAsset()(uint256)")) / 1e6
         for real_addr, tok in self.state["token_map"].items():
@@ -408,8 +409,10 @@ class Executor:
         self.send(self.dep["vault"], "postNav(uint256)", int(nav * 1e6))
         self.state["last_nav_post"] = time.time()
         self.save()
-        # shared with sleeve.py for live sizing of Solana copies
-        (lib.data_dir(self.cfg) / "nav.json").write_text(
+        # shared with sleeve.py for live sizing of Solana copies (env-suffixed:
+        # a testnet executor must never feed sizing to the live sleeve)
+        suffix = "_mainnet" if self.mainnet else "_testnet"
+        (lib.data_dir(self.cfg) / f"nav{suffix}.json").write_text(
             json.dumps({"nav_usd": nav, "ts": time.time()}))
         print(f"  [exec] posted NAV ${nav:,.2f}")
         try:
@@ -417,6 +420,49 @@ class Executor:
         except Exception as e:
             print(f"  [exec warn] sleeve bridge check failed: {e}")
         return nav
+
+    # ------------------------------------------------------------ bridging
+    # A pending-order ledger (data/bridge_pending.json, re-read every use so
+    # sync and executor share it) prevents re-bridging while a DLN order is
+    # unfilled; escrowed funds still count in NAV.
+
+    def _bridge_file(self):
+        return lib.data_dir(self.cfg) / "bridge_pending.json"
+
+    def bridge_pending_usd(self):
+        p = self._bridge_file()
+        if not p.exists():
+            return 0.0
+        try:
+            d = json.loads(p.read_text())
+        except ValueError:
+            return 0.0
+        if time.time() - d["ts"] > 86400:
+            return 0.0  # stale — assume resolved/cancelled, stop counting
+        import sleeve as sleeve_mod
+        pub = sleeve_mod._env().get("SLEEVE_SOLANA_PUBKEY")
+        if pub:
+            cash, _ = sleeve_mod.token_balance(self.cfg, pub, sleeve_mod.USDC_MINT)
+            if cash >= d["cash_before"] + d["usd"] * 0.5:
+                p.unlink()  # fill arrived
+                return 0.0
+        return d["usd"]
+
+    def record_bridge(self, usd, cash_before, tx):
+        self._bridge_file().write_text(json.dumps(
+            {"usd": usd, "cash_before": cash_before, "ts": time.time(), "tx": tx}))
+
+    def bridge_to_sleeve(self, amount, cash_before):
+        """Send a vault-created DLN order for `amount` USDG -> sleeve USDC."""
+        fee = uint(self.call("0xeF4fB24aD0916217251F553c0596F8Edc630EB66",
+                             "globalFixedNativeFee()(uint88)"))
+        tx = self.send(self.dep["vault"], "fundSleeve(uint256,uint256)",
+                       int(amount * 1e6), int(amount * 0.97 * 1e6), value=str(fee))
+        self.record_bridge(amount, cash_before, tx)
+        lib.append_jsonl(self.exec_log, {"ts": round(time.time(), 3), "kind": "bridge",
+                                         "usd": round(amount, 2), "vault_tx": tx})
+        print(f"  [exec] bridging ${amount:,.2f} USDG -> sleeve via DLN: {tx}")
+        return tx
 
     def sleeve_configured(self):
         if getattr(self, "_sleeve_ok", None) is None:
@@ -426,9 +472,12 @@ class Executor:
 
     def maybe_fund_sleeve(self, nav):
         """Keep the sleeve's USDC buffer topped up via a vault-created DLN
-        order (receiver pinned on-chain). Runs on the NAV cadence."""
+        order (receiver pinned on-chain). Runs on the NAV cadence; never
+        while an earlier order is still in flight."""
         scfg = self.cfg.get("sleeve", {})
         if not (self.mainnet and scfg.get("auto_bridge") and self.sleeve_configured()):
+            return
+        if self.bridge_pending_usd() > 0:
             return
         import sleeve as sleeve_mod
         pub = sleeve_mod._env().get("SLEEVE_SOLANA_PUBKEY")
@@ -443,13 +492,7 @@ class Executor:
         amount = min(target - cash, max(vault_cash - 1, 0))
         if amount < scfg.get("min_bridge_usd", 3):
             return
-        fee = uint(self.call("0xeF4fB24aD0916217251F553c0596F8Edc630EB66",
-                             "globalFixedNativeFee()(uint88)"))
-        tx = self.send(self.dep["vault"], "fundSleeve(uint256,uint256)",
-                       int(amount * 1e6), int(amount * 0.97 * 1e6), value=str(fee))
-        lib.append_jsonl(self.exec_log, {"ts": round(time.time(), 3), "kind": "bridge",
-                                         "usd": round(amount, 2), "vault_tx": tx})
-        print(f"  [exec] bridging ${amount:,.2f} USDG -> sleeve via DLN: {tx}")
+        self.bridge_to_sleeve(amount, cash)
 
     # ------------------------------------------------------------ trades
 

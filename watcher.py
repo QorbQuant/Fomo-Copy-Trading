@@ -30,6 +30,15 @@ def is_funding_token(leg):
             and 0.98 < leg["price_usd"] < 1.02)
 
 
+_code_cache = {}
+
+
+def is_contract(rpc_url, addr):
+    if addr not in _code_cache:
+        _code_cache[addr] = lib.rpc(rpc_url, "eth_getCode", [addr, "latest"]) not in ("0x", None)
+    return _code_cache[addr]
+
+
 def normalize_tx(cfg, tx_hash, logs, detected_at, backfill):
     """Turn one tx's Transfer logs into a normalized trade dict (or None)."""
     trader = cfg["trader"]["evm_address"].lower()
@@ -37,6 +46,7 @@ def normalize_tx(cfg, tx_hash, logs, detected_at, backfill):
     chain_slug = cfg["chain"]["dexscreener_chain_id"]
 
     ins, outs = {}, {}  # token -> raw amount
+    counterparties = {"in": set(), "out": set()}
     for lg in logs:
         token = lg["address"].lower()
         sender = "0x" + lg["topics"][1][-40:]
@@ -44,8 +54,10 @@ def normalize_tx(cfg, tx_hash, logs, detected_at, backfill):
         amount = int(lg["data"], 16)
         if sender == trader:
             outs[token] = outs.get(token, 0) + amount
+            counterparties["out"].add(recipient)
         if recipient == trader:
             ins[token] = ins.get(token, 0) + amount
+            counterparties["in"].add(sender)
 
     def leg(token, raw):
         meta = lib.token_meta(rpc_url, token)
@@ -91,6 +103,14 @@ def normalize_tx(cfg, tx_hash, logs, detected_at, backfill):
     if is_funding_token(asset):
         return {**base, "kind": "funding", "side": side, "usd_value": asset["usd"],
                 "asset_token": asset}
+    # One-sided moves: a real fomo fill settles against a router CONTRACT
+    # (Relay etc.); a transfer where every counterparty is a plain wallet is a
+    # migration / CEX deposit / airdrop — never a trade to mirror. This guards
+    # both full-exit mirroring (outbound moves) and airdrop poisoning (inbound).
+    parties = counterparties["in" if side == "buy" else "out"]
+    if parties and not any(is_contract(rpc_url, p) for p in parties):
+        return {**base, "kind": "transfer", "side": side, "usd_value": asset["usd"],
+                "asset_token": asset}
     # One-sided fill: fomo's unified balance means the other leg can settle on
     # another chain (Relay). Treat as a trade, flagged.
     return {**base, "kind": "swap", "side": side, "usd_value": asset["usd"],
@@ -122,7 +142,7 @@ def process_range(cfg, from_block, to_block, backfill=False):
                 rec = copier.plan_copy(cfg, trade, d / "copy_trades.jsonl")
                 _print_trade(trade, rec)
             else:
-                print(f"  [funding] {trade['side']} {trade['asset_token']['symbol']} "
+                print(f"  [{trade['kind']}] {trade['side']} {trade['asset_token']['symbol']} "
                       f"${(trade['usd_value'] or 0):,.0f} {tx_hash[:10]}")
     return n_trades
 

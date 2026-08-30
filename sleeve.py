@@ -76,8 +76,8 @@ def sleeve_value_usd(cfg, pubkey):
 
 
 def _read_vault_nav(cfg, max_age_s=900):
-    """Last NAV the executor posted (written to data/nav.json); None if stale."""
-    p = lib.data_dir(cfg) / "nav.json"
+    """Last MAINNET NAV the executor posted; None if stale."""
+    p = lib.data_dir(cfg) / "nav_mainnet.json"
     if not p.exists():
         return None
     try:
@@ -181,7 +181,11 @@ def handle_copy(cfg, trade, rec):
             remaining, _ = token_balance(cfg, cfg["trader"]["solana_address"], mint)
             sold = rec.get("trader_amount") or 0
             frac = sold / (sold + remaining) if sold + remaining > 0 else 0
-            if frac >= 0.95:
+            if rec.get("one_sided"):
+                # can't distinguish a wallet move from a sell on this path:
+                # bound the mirror, let sync converge the rest
+                frac = min(frac, 0.33)
+            elif frac >= 0.95:
                 frac = 1.0
             sell_amt = held * frac
             if sell_amt * (rec.get("detection_price_usd") or 0) < 0.25 and frac < 1.0:

@@ -194,25 +194,34 @@ def main():
     if sol_plan and ex.mainnet:
         os.environ["SLEEVE_EXECUTE"] = "1"  # user invoked sync = consent
         buy_need = sum(p["delta"] for p in sol_plan if p["delta"] > 0)
+        sell_frees = sum(-p["delta"] for p in sol_plan if p["delta"] < 0) * 0.95
         cash, _ = sleeve_mod.token_balance(cfg, sleeve_pub, sleeve_mod.USDC_MINT)
-        shortfall = buy_need + 1 - cash
+        vault_cash = uint(ex.call(ex.asset_addr(), "balanceOf(address)(uint256)",
+                                  ex.dep["vault"])) / 1e6
+        shortfall = min(buy_need + 1 - cash - sell_frees, max(vault_cash - 1, 0))
         if shortfall > cfg["sleeve"].get("min_bridge_usd", 3):
-            if ex.sleeve_configured():
-                fee = uint(ex.call("0xeF4fB24aD0916217251F553c0596F8Edc630EB66",
-                                   "globalFixedNativeFee()(uint88)"))
-                tx = ex.send(ex.dep["vault"], "fundSleeve(uint256,uint256)",
-                             int(shortfall * 1e6), int(shortfall * 0.97 * 1e6), value=str(fee))
-                print(f"  [sync] bridging ${shortfall:,.2f} to sleeve via DLN {tx[:14]} — waiting for fill...")
-                t0 = time.time()
-                while time.time() - t0 < 300:
-                    time.sleep(10)
-                    now_cash, _ = sleeve_mod.token_balance(cfg, sleeve_pub, sleeve_mod.USDC_MINT)
-                    if now_cash > cash + shortfall * 0.5:
-                        print(f"  [sync] sleeve funded: ${now_cash:,.2f} USDC")
-                        break
-                else:
-                    print("  [sync] DLN fill not seen in 5min — buys will partial-fill; "
-                          "funds are escrowed in the order, check later")
+            if not cfg["sleeve"].get("auto_bridge"):
+                print(f"  [sync] sleeve short ${shortfall:,.2f} but auto_bridge is off "
+                      "in config.json — buys will partial-fill")
+            elif ex.bridge_pending_usd() > 0:
+                print("  [sync] a bridge order is already in flight — buys will partial-fill")
+            elif ex.sleeve_configured():
+                try:
+                    ex.post_nav(force=True)  # fundSleeve requires fresh NAV
+                    ex.bridge_to_sleeve(shortfall, cash)
+                    print(f"  [sync] waiting for DLN fill...")
+                    t0 = time.time()
+                    while time.time() - t0 < 300:
+                        time.sleep(10)
+                        now_cash, _ = sleeve_mod.token_balance(cfg, sleeve_pub, sleeve_mod.USDC_MINT)
+                        if now_cash > cash + shortfall * 0.5:
+                            print(f"  [sync] sleeve funded: ${now_cash:,.2f} USDC")
+                            break
+                    else:
+                        print("  [sync] DLN fill not seen in 5min — buys will partial-fill; "
+                              "escrow is tracked in bridge_pending.json and counted in NAV")
+                except RuntimeError as e:
+                    print(f"  [sync] bridge failed ({e}) — continuing with partial fills")
             else:
                 print(f"  [sync] sleeve needs ${shortfall:,.2f} more USDC but vault sleeve "
                       "is not configured — buys will partial-fill")
@@ -224,11 +233,13 @@ def main():
                   f"{'buy' if p['delta'] > 0 else 'sell'} ${abs(p['delta']):,.2f} {p['symbol']}"
                   + (f" ({fill.get('skip_reason')})" if fill and not ok else ""))
 
-    # ---------------- Robinhood Chain legs (vault mirrorTrade clips)
+    # ---------------- Robinhood Chain legs (sells first: they fund the buys)
     clip_cap = nav * CLIP_FRACTION
     asset = ex.asset_addr()
-    for p in plan:
-        if p.get("chain") == "solana":
+    cash_out = False
+    for p in sorted((p for p in plan if p.get("chain") != "solana"),
+                    key=lambda p: p["delta"]):
+        if cash_out and p["delta"] > 0:
             continue
         try:
             tok = ex.ensure_token(p["addr"], p["symbol"], p["price"])
@@ -246,8 +257,9 @@ def main():
                                           ex.dep["vault"])) / 1e6
                 clip = min(clip, cash_avail - 1)
                 if clip < MIN_CLIP_USD:
-                    print(f"  [sync] out of cash at {p['symbol']}")
-                    return
+                    print(f"  [sync] out of cash at {p['symbol']} — remaining buys skipped")
+                    cash_out = True
+                    break
                 amount_in = int(clip * 1e6)
                 if ex.mainnet:
                     min_out = ex.min_out(tok, "buy", amount_in)
