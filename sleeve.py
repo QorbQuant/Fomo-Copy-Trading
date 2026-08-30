@@ -24,9 +24,44 @@ import requests
 import lib
 
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+BONK_MINT = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
 JUPITER_BASES = ("https://lite-api.jup.ag/swap/v1", "https://quote-api.jup.ag/v6")
 
 _session = requests.Session()
+
+
+def _sol(cfg, method, params):
+    return lib.rpc(cfg["solana"]["rpc"], method, params, retries=5)
+
+
+def sol_balance(cfg, pubkey):
+    return ((_sol(cfg, "getBalance", [pubkey]) or {}).get("value") or 0) / 1e9
+
+
+def token_balance(cfg, owner, mint):
+    """-> (ui_amount, decimals or None)"""
+    res = _sol(cfg, "getTokenAccountsByOwner", [owner, {"mint": mint}, {"encoding": "jsonParsed"}])
+    total, dec = 0.0, None
+    for v in (res or {}).get("value", []):
+        ta = v["account"]["data"]["parsed"]["info"]["tokenAmount"]
+        total += float(ta["uiAmount"] or 0)
+        dec = ta["decimals"]
+    return total, dec
+
+
+def mint_decimals(cfg, mint):
+    return ((_sol(cfg, "getTokenSupply", [mint]) or {}).get("value") or {}).get("decimals")
+
+
+def confirm_sig(cfg, sig, timeout=75):
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        st = _sol(cfg, "getSignatureStatuses", [[sig], {"searchTransactionHistory": True}])
+        v = ((st or {}).get("value") or [None])[0]
+        if v:
+            return v.get("err") is None
+        time.sleep(2)
+    return None
 
 
 def _env():
@@ -125,10 +160,73 @@ def _execute(cfg, quote):
                 sig = lib.rpc(cfg["solana"]["rpc"], "sendTransaction",
                               [base64.b64encode(bytes(signed)).decode(),
                                {"encoding": "base64", "skipPreflight": False}])
-                print(f"  [sleeve] EXECUTED {sig}")
-                return sig
+                print(f"  [sleeve] sent {sig} — confirming...")
+                ok = confirm_sig(cfg, sig)
+                if ok:
+                    print(f"  [sleeve] CONFIRMED {sig}")
+                    return sig
+                print(f"  [sleeve] {'FAILED on-chain' if ok is False else 'confirmation timeout'}: {sig}")
+                return None
             except requests.RequestException:
                 continue
     except Exception as e:
         print(f"  [sleeve] execution failed: {e}")
     return None
+
+
+def main():
+    """Self-test of the REAL execution leg with a synthetic signal — no
+    dependency on the tracked trader. Needs the sleeve funded with a little
+    SOL (gas) and USDC. Round trip:
+
+        python3 sleeve.py --test-buy 2     # buy $2 of BONK via Jupiter
+        python3 sleeve.py --test-sell      # sell the whole BONK balance back
+    """
+    import json as _json
+    import sys
+    cfg = lib.load_config()
+    pub = _env().get("SLEEVE_SOLANA_PUBKEY")
+    if not pub:
+        raise SystemExit("SLEEVE_SOLANA_PUBKEY missing from .env")
+
+    def balances():
+        sol = sol_balance(cfg, pub)
+        usdc, _ = token_balance(cfg, pub, USDC_MINT)
+        bonk, bdec = token_balance(cfg, pub, BONK_MINT)
+        print(f"  sleeve {pub}\n  SOL {sol:.5f}   USDC {usdc:.2f}   BONK {bonk:,.0f}")
+        return sol, usdc, bonk, bdec
+
+    print("before:")
+    sol, usdc, bonk, bdec = balances()
+    info = lib.token_price_info(BONK_MINT, cfg["solana"]["dexscreener_chain_id"])
+    dec = bdec if bdec is not None else mint_decimals(cfg, BONK_MINT)
+    os.environ["SLEEVE_EXECUTE"] = "1"
+
+    if "--test-buy" in sys.argv:
+        i = sys.argv.index("--test-buy")
+        usd = float(sys.argv[i + 1]) if len(sys.argv) > i + 1 else 2.0
+        if sol < 0.003:
+            raise SystemExit(f"need ~0.003+ SOL for fees, have {sol:.5f} — fund {pub}")
+        if usdc < usd:
+            raise SystemExit(f"need ${usd} USDC in the sleeve, have ${usdc:.2f} — fund {pub}")
+        rec = {"side": "buy", "tx_hash": "SLEEVE-TEST", "asset_address": BONK_MINT,
+               "asset_symbol": info["symbol"] or "BONK", "asset_decimals": dec,
+               "copy_usd": usd, "detection_price_usd": info["price"]}
+    elif "--test-sell" in sys.argv:
+        if bonk <= 0:
+            raise SystemExit("no BONK to sell — run --test-buy first")
+        rec = {"side": "sell", "tx_hash": "SLEEVE-TEST", "asset_address": BONK_MINT,
+               "asset_symbol": info["symbol"] or "BONK", "asset_decimals": dec,
+               "copy_amount": bonk, "copy_usd": bonk * (info["price"] or 0),
+               "detection_price_usd": info["price"]}
+    else:
+        raise SystemExit(main.__doc__)
+
+    fill = handle_copy(cfg, {"chain": "solana"}, rec)
+    print(_json.dumps(fill, indent=1))
+    print("after:")
+    balances()
+
+
+if __name__ == "__main__":
+    main()
