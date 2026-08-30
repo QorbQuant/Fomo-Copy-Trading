@@ -25,16 +25,24 @@ MIN_WEIGHT = 0.005  # ignore positions under 0.5% of the trader's book
 MIN_CLIP_USD = 2.0
 CLIP_FRACTION = 0.049  # per-trade, matches the vault's 5% cap with margin
 
+# Anti-poisoning: anyone can airdrop clone tokens (fake PONS/CASHBIRD with
+# fake pricing) into the trader's public wallet, inflating computed weights so
+# the vault sells real assets to buy scams. A position only counts in the book
+# if its deepest pool is real-money deep and could plausibly pay the position
+# out.
+MIN_BOOK_LIQUIDITY = 25_000  # deepest-pair liquidity, USD
+MAX_POSITION_VS_LIQUIDITY = 1.0  # holding "worth" more than its pool is fake
+
 
 def fetch_trader_portfolio(cfg):
-    """-> (positions [{addr, symbol, usd, price}], cash_usd, total_usd)"""
+    """-> (positions [{addr, symbol, usd, price}], cash_usd, total_usd, excluded)"""
     addr = cfg["trader"]["evm_address"]
     s = requests.Session()
     s.headers["User-Agent"] = "Mozilla/5.0 (copy-vault-sync)"
     r = s.get(f"https://robinhoodchain.blockscout.com/api/v2/addresses/{addr}/tokens?type=ERC-20",
               timeout=30)
     r.raise_for_status()
-    positions, cash = [], 0.0
+    positions, cash, excluded = [], 0.0, []
     for item in r.json().get("items", []):
         t = item["token"]
         taddr = (t.get("address") or t.get("address_hash") or "").lower()
@@ -46,15 +54,19 @@ def fetch_trader_portfolio(cfg):
         if not info["price"]:
             continue
         usd = bal * info["price"]
-        leg = {"symbol": t.get("symbol") or taddr[:8], "price_usd": info["price"],
-               "liquidity_usd": info["liquidity"]}
+        symbol = t.get("symbol") or taddr[:8]
+        leg = {"symbol": symbol, "price_usd": info["price"], "liquidity_usd": info["liquidity"]}
         if is_funding_token(leg):
             cash += usd
-        else:
-            positions.append({"addr": taddr, "symbol": leg["symbol"], "usd": usd,
-                              "price": info["price"]})
+            continue
+        if (info["liquidity"] < MIN_BOOK_LIQUIDITY
+                or usd > info["liquidity"] * MAX_POSITION_VS_LIQUIDITY):
+            excluded.append({"addr": taddr, "symbol": symbol, "usd": usd,
+                             "liquidity": info["liquidity"]})
+            continue
+        positions.append({"addr": taddr, "symbol": symbol, "usd": usd, "price": info["price"]})
     total = cash + sum(p["usd"] for p in positions)
-    return positions, cash, total
+    return positions, cash, total, excluded
 
 
 def vault_position_usd(ex, real_addr, price):
@@ -73,11 +85,15 @@ def main():
     ex = Executor(mainnet="--mainnet" in sys.argv)
     cfg = ex.cfg
 
-    positions, cash, total = fetch_trader_portfolio(cfg)
+    positions, cash, total, excluded = fetch_trader_portfolio(cfg)
     positions.sort(key=lambda p: -p["usd"])
     nav = ex.compute_nav_usd()
     print(f"trader book ${total:,.0f} ({len(positions)} priced positions, "
           f"${cash:,.0f} cash) -> vault NAV ${nav:,.2f}")
+    for e in sorted(excluded, key=lambda e: -e["usd"]):
+        if e["usd"] > 100:
+            print(f"  [excluded] {e['symbol']:12} claims ${e['usd']:,.0f} but pool depth is "
+                  f"${e['liquidity']:,.0f} — airdrop/clone, not counted")
 
     plan = []
     for p in positions:
@@ -90,9 +106,25 @@ def main():
         if abs(delta) >= MIN_CLIP_USD:
             plan.append({**p, "weight": weight, "target": target, "delta": delta})
 
+    # orphan exits: vault holdings the trader has (effectively) fully exited
+    planned = {p["addr"] for p in plan}
+    weights = {p["addr"]: p["usd"] / total for p in positions}
+    for addr, tok in list(ex.state["token_map"].items()):
+        if addr in planned or weights.get(addr, 0) >= MIN_WEIGHT:
+            continue
+        info = lib.token_price_info(addr, cfg["chain"]["dexscreener_chain_id"])
+        if not info["price"]:
+            continue
+        held = vault_position_usd(ex, addr, info["price"])
+        if held >= MIN_CLIP_USD:
+            plan.append({"addr": addr, "symbol": info["symbol"] or addr[:8], "usd": 0,
+                         "price": info["price"], "weight": weights.get(addr, 0),
+                         "target": 0.0, "delta": -held})
+
     for p in plan:
         print(f"  {p['symbol']:12} weight {p['weight']*100:5.1f}%  target ${p['target']:8,.2f}  "
-              f"{'BUY' if p['delta'] > 0 else 'SELL'} ${abs(p['delta']):,.2f}")
+              f"{'BUY' if p['delta'] > 0 else 'SELL'} ${abs(p['delta']):,.2f}"
+              + ("  (trader exited)" if p["target"] == 0 else ""))
     if dry:
         return
 
@@ -125,7 +157,10 @@ def main():
                 tx = ex.send(ex.dep["vault"], "mirrorTrade(address,address,uint256,uint256)",
                              asset, tok["addr"], amount_in, min_out)
             else:
-                amount_in = int(clip / p["price"] * 10 ** dec)
+                bal = uint(ex.call(tok["addr"], "balanceOf(address)(uint256)", ex.dep["vault"]))
+                amount_in = min(int(clip / p["price"] * 10 ** dec), bal)
+                if amount_in == 0:
+                    break
                 if ex.mainnet:
                     min_out = ex.min_out(tok, "sell", amount_in)
                 else:

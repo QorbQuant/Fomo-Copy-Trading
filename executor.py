@@ -111,6 +111,18 @@ class Executor:
                 self.state["token_map"][k] = {"addr": v, "decimals": 18}
 
     def save(self):
+        # Merge-safe: another keeper process (sync vs executor) may have
+        # onboarded tokens since we loaded — never clobber a richer entry.
+        if self.state_file.exists():
+            try:
+                disk = json.loads(self.state_file.read_text())
+                for k, v in disk.get("token_map", {}).items():
+                    mine = self.state["token_map"].get(k)
+                    if isinstance(v, dict) and "legs_buy" in v and (
+                            not isinstance(mine, dict) or "legs_buy" not in mine):
+                        self.state["token_map"][k] = v
+            except (ValueError, OSError):
+                pass
         self.state_file.write_text(json.dumps(self.state, indent=1))
 
     def call(self, to, sig, *args):
@@ -129,12 +141,12 @@ class Executor:
     # ------------------------------------------------------------ tokens
 
     def ensure_token(self, real_addr, symbol, price):
-        if real_addr in self.state["token_map"]:
-            tok = self.state["token_map"][real_addr]
-        elif self.mainnet:
-            tok = self._onboard_mainnet_token(real_addr, symbol)
-        else:
-            tok = self._onboard_testnet_token(real_addr, symbol)
+        tok = self.state["token_map"].get(real_addr)
+        if self.mainnet and tok is not None and "legs_buy" not in tok:
+            tok = None  # stale pre-RouteAdapter entry: rediscover and re-set routes
+        if tok is None:
+            tok = (self._onboard_mainnet_token(real_addr, symbol) if self.mainnet
+                   else self._onboard_testnet_token(real_addr, symbol))
         if not self.mainnet:
             # pin the mock DEX to the real detection price: USDC(6d) <-> mock(18d)
             self.send(self.dep["router"], "setRate(address,address,uint256)",
@@ -390,10 +402,23 @@ class Executor:
 
     # ------------------------------------------------------------ trades
 
+    MIN_SIGNAL_LIQUIDITY = 25_000
+
     def execute(self, rec):
         price = rec.get("detection_price_usd") or rec.get("trader_implied_price_usd")
         if not price or not rec.get("trader_usd"):
             return
+        if self.mainnet and rec["side"] == "buy":
+            # Airdropped clone tokens masquerade as one-sided buys with fake
+            # pricing; only follow buys into pools deep enough to be real and
+            # sized plausibly against them.
+            info = lib.token_price_info(rec["asset_address"],
+                                        self.cfg["chain"]["dexscreener_chain_id"])
+            if (info["liquidity"] < self.MIN_SIGNAL_LIQUIDITY
+                    or rec["trader_usd"] > info["liquidity"]):
+                print(f"  [exec] untrusted signal skipped: {rec['asset_symbol']} "
+                      f"(${rec['trader_usd']:,.0f} vs pool ${info['liquidity']:,.0f})")
+                return
         tok = self.ensure_token(rec["asset_address"], rec["asset_symbol"], price)
         self.post_nav(force=True)
         nav = self.compute_nav_usd()

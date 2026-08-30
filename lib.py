@@ -136,7 +136,7 @@ def token_price_info(token, chain_slug):
     now = time.time()
     if key in _price_cache and now - _price_cache[key][0] < PRICE_TTL:
         return _price_cache[key][1]
-    info = {"price": None, "liquidity": 0.0, "symbol": None}
+    info = {"price": None, "liquidity": 0.0, "symbol": None, "volume24h": 0.0}
     try:
         r = _session.get(f"https://api.dexscreener.com/latest/dex/tokens/{token}", timeout=15)
         r.raise_for_status()
@@ -144,6 +144,7 @@ def token_price_info(token, chain_slug):
         best = None
         for p in pairs:
             liq = (p.get("liquidity") or {}).get("usd") or 0
+            vol = (p.get("volume") or {}).get("h24") or 0
             base = p.get("baseToken", {})
             quote = p.get("quoteToken", {})
             px, sym = None, None
@@ -156,9 +157,10 @@ def token_price_info(token, chain_slug):
                 except (ValueError, ZeroDivisionError):
                     px = None
             if px is not None and (best is None or liq > best[0]):
-                best = (liq, float(px), sym)
+                best = (liq, float(px), sym, vol)
         if best:
-            info = {"price": best[1], "liquidity": best[0], "symbol": best[2]}
+            info = {"price": best[1], "liquidity": best[0], "symbol": best[2],
+                    "volume24h": best[3]}
     except requests.RequestException:
         pass
     _price_cache[key] = (now, info)
