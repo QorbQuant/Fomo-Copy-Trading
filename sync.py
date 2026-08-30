@@ -225,7 +225,23 @@ def main():
             else:
                 print(f"  [sync] sleeve needs ${shortfall:,.2f} more USDC but vault sleeve "
                       "is not configured — buys will partial-fill")
+        rotation_min = cfg["sleeve"].get("rotation_bridge_min_usd", 200)
         for p in sorted(sol_plan, key=lambda p: p["delta"]):  # sells first, frees cash
+            cash, _ = sleeve_mod.token_balance(cfg, sleeve_pub, sleeve_mod.USDC_MINT)
+            if (p["delta"] >= rotation_min and p["delta"] > cash
+                    and cfg["sleeve"].get("auto_bridge") and ex.sleeve_configured()
+                    and ex.bridge_pending_usd() == 0):
+                # big rotation buy the sleeve can't cover: one DLN order does
+                # bridge + swap (solver-executed), delivered straight to the sleeve
+                try:
+                    ex.post_nav(force=True)
+                    vault_cash = uint(ex.call(ex.asset_addr(), "balanceOf(address)(uint256)",
+                                              ex.dep["vault"])) / 1e6
+                    ex.bridge_and_buy(p["addr"], p["symbol"],
+                                      min(p["delta"], max(vault_cash - 1, 0)))
+                    continue
+                except RuntimeError as e:
+                    print(f"  [sync] rotation order failed ({e}) — falling back to sleeve cash")
             fill = sleeve_mod.rebalance_position(cfg, p["addr"], p["symbol"], p["delta"],
                                                  p["price"], p.get("decimals"))
             ok = fill and fill.get("executed")

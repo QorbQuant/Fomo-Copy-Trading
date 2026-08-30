@@ -15,7 +15,8 @@
   "sleeve": {
     "auto_bridge": false,
     "buffer_pct": 5,
-    "min_bridge_usd": 3
+    "min_bridge_usd": 200,
+    "rotation_bridge_min_usd": 200
   },
   "vault": {
     "aum_usd": 100000,

@@ -442,15 +442,73 @@ class Executor:
         import sleeve as sleeve_mod
         pub = sleeve_mod._env().get("SLEEVE_SOLANA_PUBKEY")
         if pub:
-            cash, _ = sleeve_mod.token_balance(self.cfg, pub, sleeve_mod.USDC_MINT)
-            if cash >= d["cash_before"] + d["usd"] * 0.5:
-                p.unlink()  # fill arrived
-                return 0.0
+            if d.get("mint"):  # rotation order: delivery is the target token
+                held, _ = sleeve_mod.token_balance(self.cfg, pub, d["mint"])
+                if held >= (d.get("expected_out") or 0) * 0.5:
+                    p.unlink()
+                    return 0.0
+            else:  # buffer top-up: delivery is USDC
+                cash, _ = sleeve_mod.token_balance(self.cfg, pub, sleeve_mod.USDC_MINT)
+                if cash >= d["cash_before"] + d["usd"] * 0.5:
+                    p.unlink()
+                    return 0.0
         return d["usd"]
 
-    def record_bridge(self, usd, cash_before, tx):
+    def debridge_quote(self, usd, dst_mint):
+        """deBridge market quote: usd of USDG -> raw amount of dst_mint on
+        Solana, plus decimals. None if no solver market."""
+        try:
+            r = requests.get("https://dln.debridge.finance/v1.0/dln/order/quote", params={
+                "srcChainId": 4663, "srcChainTokenIn": USDG,
+                "srcChainTokenInAmount": int(usd * 1e6),
+                "dstChainId": 7565164, "dstChainTokenOut": dst_mint,
+                "prependOperatingExpenses": "false"}, timeout=25,
+                headers={"User-Agent": "copy-vault"})
+            out = r.json().get("estimation", {}).get("dstChainTokenOut", {})
+            amt = out.get("recommendedAmount") or out.get("amount")
+            if amt:
+                return int(amt), out.get("decimals", 9)
+        except (requests.RequestException, ValueError):
+            pass
+        return None, None
+
+    def bridge_and_buy(self, mint_b58, symbol, usd):
+        """One DLN order for a cross-chain rotation: give USDG, RECEIVE the
+        target Solana token at the pinned sleeve — the solver does the swap.
+        Temporarily points sleeveTakeToken at the target mint (owner action),
+        then restores it to USDC. Receiver/cap guarantees unchanged."""
+        import base58
+        quote_raw, dec = self.debridge_quote(usd, mint_b58)
+        if not quote_raw:
+            raise RuntimeError(f"no DLN solver market for {symbol}")
+        take_min = int(quote_raw * 0.97)
+        usdc32 = "0x" + base58.b58decode(
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v").hex()
+        mint32 = "0x" + base58.b58decode(mint_b58).hex()
+        recv = self.call(self.dep["vault"], "sleeveReceiver()(bytes)").strip()
+        cap = uint(self.call(self.dep["vault"], "sleeveCapBps()(uint256)"))
+        dln = self.call(self.dep["vault"], "dlnSource()(address)").strip()
+        fee = uint(self.call(dln, "globalFixedNativeFee()(uint88)"))
+        self.send(self.dep["vault"], "setSleeve(address,bytes,bytes,uint256)",
+                  dln, recv, mint32, cap)
+        try:
+            tx = self.send(self.dep["vault"], "fundSleeve(uint256,uint256)",
+                           int(usd * 1e6), take_min, value=str(fee))
+        finally:
+            self.send(self.dep["vault"], "setSleeve(address,bytes,bytes,uint256)",
+                      dln, recv, usdc32, cap)
+        expected_ui = quote_raw / 10 ** dec
+        self.record_bridge(usd, 0, tx, mint=mint_b58, expected_out=expected_ui)
+        lib.append_jsonl(self.exec_log, {"ts": round(time.time(), 3), "kind": "rotation_bridge",
+                                         "usd": round(usd, 2), "symbol": symbol,
+                                         "mint": mint_b58, "vault_tx": tx})
+        print(f"  [exec] rotation order: ${usd:,.2f} USDG -> {symbol} @ sleeve, DLN {tx[:14]}")
+        return tx
+
+    def record_bridge(self, usd, cash_before, tx, mint=None, expected_out=None):
         self._bridge_file().write_text(json.dumps(
-            {"usd": usd, "cash_before": cash_before, "ts": time.time(), "tx": tx}))
+            {"usd": usd, "cash_before": cash_before, "ts": time.time(), "tx": tx,
+             "mint": mint, "expected_out": expected_out}))
 
     def bridge_to_sleeve(self, amount, cash_before):
         """Send a vault-created DLN order for `amount` USDG -> sleeve USDC."""
