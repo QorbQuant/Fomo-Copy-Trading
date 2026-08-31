@@ -58,3 +58,23 @@ contract MockRouter is ICopyRouter {
         require(IERC20(tokenOut).transfer(to, amountOut), "out");
     }
 }
+
+/// Minimal WETH: deposit() wraps native into 1:1 tokens; withdraw() unwraps
+/// and returns native. Used to exercise CopyVaultV3.sweepGas end-to-end.
+contract MockWETH is MiniERC20 {
+    constructor() MiniERC20("Wrapped Ether", "WETH", 18) {}
+
+    function deposit() external payable {
+        _mint(msg.sender, msg.value);
+    }
+
+    function withdraw(uint256 amount) external {
+        _burn(msg.sender, amount);
+        (bool ok,) = msg.sender.call{value: amount}("");
+        require(ok, "eth");
+    }
+
+    receive() external payable {
+        _mint(msg.sender, msg.value);
+    }
+}
