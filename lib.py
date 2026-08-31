@@ -13,8 +13,57 @@ _session = requests.Session()
 _session.headers["User-Agent"] = "fomo-copy-vault-prototype/0.1"
 
 
+def _read_env():
+    """Merge contracts/.env + repo-root .env + os.environ (later wins)."""
+    import os
+    out = {}
+    for p in (ROOT / "contracts" / ".env", ROOT / ".env"):
+        if p.exists():
+            for line in p.read_text().splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, val = line.split("=", 1)
+                    out[k.strip()] = val.strip()
+    out.update(os.environ)
+    return out
+
+
+# Alchemy network subdomains (one API key serves every network).
+_ALCHEMY = {
+    "robinhood": "robinhood-mainnet", "base": "base-mainnet",
+    "ethereum": "eth-mainnet", "monad": "monad-mainnet",
+    "bnb": "bnb-mainnet", "solana": "solana-mainnet",
+}
+
+
+def resolve_rpc(chain_name, default):
+    """Dedicated RPC for a chain if configured, else the public default.
+    Precedence: RPC_<CHAIN> full-URL override > ALCHEMY_KEY-built URL > default.
+    Keys live in .env (gitignored) so no endpoint/secret is committed."""
+    env = _read_env()
+    explicit = env.get(f"RPC_{chain_name.upper()}")
+    if explicit:
+        return explicit
+    key = env.get("ALCHEMY_KEY")
+    if key and chain_name in _ALCHEMY:
+        return f"https://{_ALCHEMY[chain_name]}.g.alchemy.com/v2/{key}"
+    return default
+
+
 def load_config():
-    return json.loads((ROOT / "config.json").read_text())
+    cfg = json.loads((ROOT / "config.json").read_text())
+    # overlay dedicated RPCs onto every chain the config knows about
+    cfg["chain"]["rpc"] = resolve_rpc(cfg["chain"]["name"], cfg["chain"]["rpc"])
+    if "solana" in cfg:
+        cfg["solana"]["rpc"] = resolve_rpc("solana", cfg["solana"]["rpc"])
+    for group in ("chains", "satellites"):
+        for name, c in cfg.get(group, {}).items():
+            if c.get("rpc"):
+                c["rpc"] = resolve_rpc(name, c["rpc"])
+    for name, c in cfg.get("cctp", {}).get("chains", {}).items():
+        if c.get("rpc"):
+            c["rpc"] = resolve_rpc(name, c["rpc"])
+    return cfg
 
 
 def data_dir(cfg):

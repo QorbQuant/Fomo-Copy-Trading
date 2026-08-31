@@ -27,7 +27,7 @@ import sleeve
 
 SOL_MINT = "So11111111111111111111111111111111111111112"
 NATIVE_ETH = "0x0000000000000000000000000000000000000000"
-EVM_RPC = "https://rpc.mainnet.chain.robinhood.com"
+EVM_RPC = lib.resolve_rpc("robinhood", "https://rpc.mainnet.chain.robinhood.com")
 WETH = "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"
 MIN_SLEEVE_USDC_FLOOR = 10.0  # never drain the sleeve below this
 

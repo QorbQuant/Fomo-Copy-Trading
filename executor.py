@@ -99,7 +99,7 @@ class Executor:
         self.cfg = lib.load_config()
         self.mainnet = mainnet
         self.dep = DEPLOYMENTS["robinhood-mainnet" if mainnet else "robinhood-testnet"]
-        self.rpc = self.dep["rpc"]
+        self.rpc = lib.resolve_rpc("robinhood" if mainnet else "robinhood-testnet", self.dep["rpc"])
         suffix = "_mainnet" if mainnet else ""
         self.exec_log = lib.data_dir(self.cfg) / f"executions{suffix}.jsonl"
         self.state_file = lib.data_dir(self.cfg) / f"executor_state{suffix}.json"
