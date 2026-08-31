@@ -12,6 +12,14 @@
     "solana_address": "H2QSGECp13sFLJgdTsDtayX3dk18Dm6sQMSQKcew7Xzk",
     "ref_capital_usd": 1800000
   },
+  "gas": {
+    "auto_refill": true,
+    "evm_min_eth": 0.003,
+    "evm_target_eth": 0.01,
+    "sol_min": 0.005,
+    "sol_target": 0.02,
+    "max_refill_usd_per_day": 60
+  },
   "sleeve": {
     "auto_bridge": true,
     "buffer_pct": 5,

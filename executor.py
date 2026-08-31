@@ -456,6 +456,12 @@ class Executor:
             self.maybe_fund_sleeve(nav)
         except Exception as e:
             print(f"  [exec warn] sleeve bridge check failed: {e}")
+        if self.mainnet:
+            try:
+                import gas
+                gas.maintain(self.cfg)
+            except Exception as e:
+                print(f"  [exec warn] gas maintenance failed: {e}")
         return nav
 
     # ------------------------------------------------------------ bridging
