@@ -324,6 +324,9 @@ def main():
     clip_cap = nav * CLIP_FRACTION
     asset = ex.asset_addr()
     cash_out = False
+    # one NAV post covers the whole sync (navTtl is 30 min, sync takes minutes) —
+    # posting per clip was doubling the gas burn
+    ex.post_nav(force=True)
     for p in sorted((p for p in plan if p.get("chain") != "solana"),
                     key=lambda p: p["delta"]):
         if cash_out and p["delta"] > 0:
@@ -338,7 +341,6 @@ def main():
         side = "buy" if p["delta"] > 0 else "sell"
         while remaining >= MIN_CLIP_USD:
             clip = min(remaining, clip_cap)
-            ex.post_nav(force=True)
             if side == "buy":
                 cash_avail = uint(ex.call(asset, "balanceOf(address)(uint256)",
                                           ex.dep["vault"])) / 1e6

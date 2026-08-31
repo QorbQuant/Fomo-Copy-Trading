@@ -451,7 +451,10 @@ class Executor:
         return nav
 
     def post_nav(self, force=False):
-        if not force and time.time() - self.state["last_nav_post"] < 600:
+        # idle cadence stays under the 30-min navTtl but far above the old 10 min
+        # — most posts were pure gas burn (deposits only need NAV < navTtl old)
+        cadence = self.cfg.get("nav_post_seconds", 1500)
+        if not force and time.time() - self.state["last_nav_post"] < cadence:
             return
         nav = self.compute_nav_usd()
         self.send(self.dep["vault"], "postNav(uint256)", int(nav * 1e6))

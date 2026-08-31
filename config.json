@@ -71,17 +71,18 @@
       "arc": {"domain": 26, "rpc": "", "usdc": "", "fast": true, "_note": "fill rpc + native USDC address at Sept 16 mainnet launch"}
     }
   },
+  "nav_post_seconds": 1500,
   "gas": {
     "auto_refill": true,
-    "evm_min_eth": 0.003,
-    "evm_target_eth": 0.01,
-    "sol_min": 0.025,
-    "sol_target": 0.05,
-    "max_refill_usd_per_day": 60
+    "evm_min_eth": 0.006,
+    "evm_target_eth": 0.012,
+    "sol_min": 0.02,
+    "sol_target": 0.04,
+    "max_refill_usd_per_day": 80
   },
   "sleeve": {
     "auto_bridge": true,
-    "buffer_pct": 5,
+    "buffer_pct": 8,
     "min_bridge_usd": 200,
     "rotation_bridge_min_usd": 200
   },
