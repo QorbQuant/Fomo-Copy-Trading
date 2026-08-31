@@ -20,6 +20,8 @@ sudo -u fomo python3 -m pip install --break-system-packages --quiet requests sol
 install -m 644 /home/fomo/fomo-copy-vault/deploy/fomo-*.service /home/fomo/fomo-copy-vault/deploy/fomo-*.timer /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now fomo-watcher fomo-solana-watcher fomo-executor fomo-report.timer
+# multi-chain observation (paper only): watch AJC's same EVM address on each chain
+systemctl enable --now fomo-observe@base fomo-observe@monad fomo-observe@bnb fomo-observe@ethereum
 
 sleep 5
 systemctl --no-pager --lines=5 status fomo-watcher fomo-solana-watcher fomo-executor || true
