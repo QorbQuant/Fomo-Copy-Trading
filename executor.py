@@ -639,6 +639,12 @@ class Executor:
 
     MIN_SIGNAL_LIQUIDITY = 25_000
 
+    def _log_skip(self, rec, reason):
+        lib.append_jsonl(self.exec_log, {
+            "ts": round(time.time(), 3), "kind": "skip", "signal_tx": rec.get("tx_hash"),
+            "side": rec.get("side"), "symbol": rec.get("asset_symbol"), "reason": reason})
+        print(f"  [exec] {rec.get('asset_symbol')}: {reason}")
+
     def execute(self, rec):
         price = rec.get("detection_price_usd") or rec.get("trader_implied_price_usd")
         if not price or not rec.get("trader_usd"):
@@ -651,8 +657,8 @@ class Executor:
                                         self.cfg["chain"]["dexscreener_chain_id"])
             if (info["liquidity"] < self.MIN_SIGNAL_LIQUIDITY
                     or rec["trader_usd"] > info["liquidity"]):
-                print(f"  [exec] untrusted signal skipped: {rec['asset_symbol']} "
-                      f"(${rec['trader_usd']:,.0f} vs pool ${info['liquidity']:,.0f})")
+                self._log_skip(rec, f"untrusted: ${rec['trader_usd']:,.0f} vs pool "
+                                    f"${info['liquidity']:,.0f}")
                 return
         tok = self.ensure_token(rec["asset_address"], rec["asset_symbol"], price)
         self.post_nav(force=True)
@@ -660,7 +666,8 @@ class Executor:
 
         fraction = min(rec["trader_usd"] / self.cfg["trader"]["ref_capital_usd"], MAX_TRADE_FRACTION)
         usd = nav * fraction
-        if usd < 1:
+        if usd < 1 and rec["side"] == "buy":
+            self._log_skip(rec, f"proportional buy ${usd:.2f} below $1 floor")
             return
         asset = self.asset_addr()
 
@@ -680,18 +687,30 @@ class Executor:
             bal = uint(self.call(tok["addr"], "balanceOf(address)(uint256)", self.dep["vault"]))
             if self.mainnet and rec.get("trader_amount"):
                 # mirror the FRACTION of the position the trader sold — a full
-                # exit mirrors as a full exit (sells have no on-chain cap)
+                # exit mirrors as a full exit (sells have no on-chain cap).
+                # Sub-floor fractions ACCUMULATE so chunked selling (his usual
+                # style) trims us cumulatively instead of never.
                 remaining = uint(self.call(tok["addr"], "balanceOf(address)(uint256)",
                                            self.cfg["trader"]["evm_address"])) / 10 ** tok["decimals"]
                 sold = rec["trader_amount"]
                 frac = sold / (sold + remaining) if sold + remaining > 0 else 0
+                pend = self.state.setdefault("pending_sell_frac", {})
+                frac = min(frac + pend.get(rec["asset_address"], 0.0), 1.0)
                 if frac >= 0.95:
                     frac = 1.0
                 amount_in = int(bal * frac)
                 usd = amount_in / 10 ** tok["decimals"] * price
+                if usd < 0.50 and frac < 1.0:
+                    pend[rec["asset_address"]] = frac
+                    self.save()
+                    self._log_skip(rec, f"sell frac accumulating ({frac*100:.2f}% = ${usd:.2f})")
+                    return
+                pend.pop(rec["asset_address"], None)
+                self.save()
             else:
                 amount_in = min(bal, int(usd / price * 10 ** tok["decimals"]))
             if amount_in == 0 or (usd < 0.25 and amount_in < bal):
+                self._log_skip(rec, "sell below dust floor")
                 return
             if self.mainnet:
                 min_out = self.min_out(tok, "sell", amount_in)

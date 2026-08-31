@@ -1,0 +1,8 @@
+[Unit]
+Description=fomo copy-vault: 10-minute activity report (to journal)
+
+[Service]
+Type=oneshot
+User=fomo
+WorkingDirectory=/home/fomo/fomo-copy-vault
+ExecStart=/usr/bin/python3 /home/fomo/fomo-copy-vault/report.py

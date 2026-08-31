@@ -17,9 +17,9 @@ fi
 
 sudo -u fomo python3 -m pip install --break-system-packages --quiet requests solders base58
 
-install -m 644 /home/fomo/fomo-copy-vault/deploy/fomo-*.service /etc/systemd/system/
+install -m 644 /home/fomo/fomo-copy-vault/deploy/fomo-*.service /home/fomo/fomo-copy-vault/deploy/fomo-*.timer /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --now fomo-watcher fomo-solana-watcher fomo-executor
+systemctl enable --now fomo-watcher fomo-solana-watcher fomo-executor fomo-report.timer
 
 sleep 5
 systemctl --no-pager --lines=5 status fomo-watcher fomo-solana-watcher fomo-executor || true
