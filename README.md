@@ -1,136 +1,191 @@
 # fomo-copy-vault
 
-Prototype for a single-trader copytrading vault on Robinhood Chain: watch a
-fomo trader's wallet on-chain and paper-trade what an ERC-4626 copy vault
-would do. **Phase 1 of the plan — no contracts, no real money.** The output of
-this phase is a go/no-go number: does copied PnL survive detection latency?
+A live, single-trader copytrading vault on **Robinhood Chain mainnet** that
+autonomously mirrors a [fomo](https://fomo.family) trader's full portfolio
+across Robinhood Chain **and** Solana. Deposit USDG, receive `avgJOE` vault
+shares, and the vault tracks the trader's positions — same-chain trades in
+seconds, cross-chain rotations through a bridge, gas and capital maintained
+from its own treasury.
+
+> **Status:** running on mainnet with real funds as a personal vault. It is
+> unaudited prototype software. See [Trust & risk](#trust--risk) before
+> anyone else's money touches it.
+
+## How it works
+
+```
+@AvgJoesCrypto trades (Robinhood Chain or Solana)
+   │
+   ├─ watcher.py / solana_watcher.py   detect the swap on-chain (~5s)
+   │
+   ├─ copier.py                        size the copy vs the vault's NAV
+   │
+   └─ executor.py                      execute on-chain, within guardrails:
+        ├─ Robinhood Chain  → CopyVault.mirrorTrade() via Uniswap V3/V4
+        ├─ Solana           → sleeve wallet swaps via Jupiter
+        ├─ rotations        → deBridge order bridges + swaps in one fill
+        └─ treasury         → auto-refills keeper ETH + sleeve SOL from USDC
+```
+
+Two loops run continuously: a **reflex** loop (the watchers → executor) mirrors
+each trade fast but capped at 5% of NAV per trade, and a **convergence** loop
+(`sync.py`) periodically pulls the vault's weights all the way to the trader's,
+including cross-chain rebalancing. Big moves complete through convergence; the
+cap is the anti-manipulation rail.
+
+## The vault token (`contracts/CopyVault.sol`)
+
+`avgJOE` is an **ERC-20** minted on deposit — your share of the pool. The
+contract is **ERC-4626-*style*** (deposit returns shares, keeper-posted NAV
+prices them) but deliberately **not** 4626-compliant: it holds many tokens at
+once, so instead of single-asset `redeem()` it uses **`redeemInKind()`** —
+burning shares pays a pro-rata slice of *every* token the vault holds. Exits
+therefore never depend on NAV pricing, which removes the main manipulation
+surface by construction.
+
+On-chain guardrails, all enforced in Solidity:
+
+- **`mirrorTrade()`** — executor-only; one side must be the asset (USDG); buys
+  capped at `maxTradeBps` (5%) of NAV and restricted to an owner-set token
+  allowlist; `minOut` slippage bound; sells only of held positions.
+- **`fundSleeve()`** — creates a deBridge DLN order the vault signs itself,
+  receiver **pinned** to the Solana sleeve pubkey (the keeper picks timing/size
+  but can never redirect funds), capped at `sleeveCapBps` (30%) of NAV.
+- **NAV freshness** — stale NAV blocks *deposits*, never redemptions.
+- **Withdraw delay** after a deposit; reentrancy guards throughout.
+
+Trust posture today: the **executor/owner is a single trusted keeper key**. No
+performance fees. See [Trust & risk](#trust--risk).
+
+## Execution routing
+
+Robinhood Chain liquidity spans Uniswap V3 and V4, and many memecoins hold
+liquidity *only* in hooked V4 pools quoted in another memecoin (e.g. SIT/AI).
+`contracts/RouteAdapter.sol` executes each trade through a sequence of mixed
+legs — V3 multihop (`SwapRouter02`) and single V4 pools (`PoolManager`,
+hooked/dynamic-fee included). Routes are discovered by depth, quoted through
+`QuoterV2`/`V4Quoter` for `minOut`, and validated leg-by-leg on-chain so a bad
+route can't misroute a trade. Reverting routes get a 6-hour cooldown instead of
+crashing the run.
+
+## Cross-chain (the Solana sleeve)
+
+The sleeve is a dedicated Solana wallet — the vault's execution arm *and* its
+ops treasury — pre-funded so Solana copies execute at detection latency
+(bridging only affects rebalancing, which isn't latency-sensitive).
+
+- **Execution:** `sleeve.py` quotes and signs Jupiter swaps for Solana copy
+  signals.
+- **Rotations:** a big cross-chain move (sell PONS on Robinhood → buy BONK on
+  Solana) is one vault-created deBridge order that **gives USDG and receives
+  the target token** at the sleeve — the solver does the swap. One fee, one
+  wait, delivered as the position.
+- **Two-way capital:** `sync.py` bridges idle sleeve USDC back to the vault
+  (delivered to the vault contract, cap counter credited via
+  `noteSleeveReturn`) when Robinhood buys are cash-short, and out to the sleeve
+  when Solana needs cash. Capital auto-balances across chains.
+- **Redemption:** in-kind for Robinhood Chain holdings; the sleeve enters NAV
+  as one line, cash-settled on exit, bounded by the cap.
+
+## Gas & treasury self-maintenance (`gas.py`)
+
+The executor checks both tanks every NAV cycle and refills from sleeve USDC:
+keeper ETH via a deBridge order (Solana → Robinhood Chain, native ETH to the
+keeper), sleeve SOL via a Jupiter swap. Bounded by a daily USD cap, floored so
+the treasury never fully drains, logged to `data/gas_refills.jsonl`. Gas is a
+deposit-funded operating expense, borne pro-rata by NAV.
+
+## Anti-poisoning
+
+Anyone can airdrop clone tokens (fake PONS/CASHBIRD with spoofed pricing) into
+the trader's public wallet. Both the book computation and live buy signals
+require a position's deepest pool to be real-money deep (≥ $25K) and the
+holding to be worth no more than that pool — so the vault never sells real
+assets to chase a scam. One-sided outbound transfers whose counterparties are
+all plain wallets (not router contracts) are classified as transfers, not
+sells, so a wallet migration never triggers a position dump.
+
+## Deployed contracts (Robinhood Chain mainnet, chain id 4663)
+
+| Contract | Address |
+|---|---|
+| `CopyVault` (`avgJOE`) | `0x12b508A1883b910a537c25883AE7DB518c1511D9` |
+| `RouteAdapter` | `0x13c2aeD11ec90f6B8b5Ca8D7Ae1050C2e55195fD` |
+| Asset (USDG) | `0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168` |
+| Solana sleeve | `3CMFpnWW5eHSS1sr5gUadNQX2CDA5uweGgiH13f823WC` |
+
+Explorer: `https://robinhoodchain.blockscout.com` · full list in
+`contracts/deployments.json`.
 
 ## Target trader
 
-**@AvgJoesCrypto** on [fomo](https://fomo.family) (49K followers).
+**@AvgJoesCrypto** on fomo (~49K followers).
 
-| chain | address | verification |
-|---|---|---|
-| EVM (Robinhood Chain, chain id 4663) | `0x06de9c48b1e639ed5c13ec8fbd4080a38e39f2d1` | EIP-7702 delegated account, actively swapping tokenized stocks + memecoins via Relay router |
-| Solana (watch-only, not copied) | `H2QSGECp13sFLJgdTsDtayX3dk18Dm6sQMSQKcew7Xzk` | Solscan shows it funded by "Fomo Co-signer", swaps via DFlow/Jupiter every few minutes |
+| chain | address |
+|---|---|
+| Robinhood Chain | `0x06de9c48b1e639ed5c13ec8fbd4080a38e39f2d1` (EIP-7702 delegated — fomo's relayer submits txs, so detection filters ERC-20 `Transfer` logs, not `tx.from`) |
+| Solana | `H2QSGECp13sFLJgdTsDtayX3dk18Dm6sQMSQKcew7Xzk` (watched per-ATA — the co-signer delegate hides swaps from wallet-level signature queries) |
 
-Addresses resolved via fomowalletfinder.com (unofficial) and corroborated
-on-chain (Fomo Co-signer funding, fomo-style EIP-7702 setup, activity profile).
-**Before trusting any results, spot-check 2–3 recent trades in the fomo app
-feed against these addresses.**
+Addresses resolved via fomowalletfinder.com and corroborated on-chain (Fomo
+Co-signer funding, EIP-7702 setup, activity profile).
 
-## Key mechanics learned
+## Running it
 
-- fomo EVM accounts are **EIP-7702 delegated**; fomo's relayer submits the txs,
-  so `tx.from` is never the trader. Detection filters ERC-20 `Transfer` logs
-  where the trader is sender or recipient.
-- fomo's unified cross-chain balance means some fills are **one-sided** on
-  Robinhood Chain (the other leg settles elsewhere via Relay). These are
-  copied too, flagged `one_sided`.
-- Prices: dexscreener supports Robinhood Chain (`chainId: "robinhood"`), free.
-- RPC: `https://rpc.mainnet.chain.robinhood.com` · explorer/API:
-  `https://robinhoodchain.blockscout.com`
+Python 3.9+, `pip install requests solders base58`, and Foundry (`cast`/`forge`
+— the executor shells out to `cast` for EVM txs). Secrets live in `.env`
+(sleeve Solana key) and `contracts/.env` (keeper EVM key), both gitignored.
 
-## Run
+```bash
+# initial / drift-correcting rebalance to the trader's weights (pause executor first)
+python3 sync.py --mainnet            # --dry-run to preview the plan
 
-```
-pip install requests
-python watcher.py        # backfills ~20k blocks, then follows live; Ctrl-C to stop
-python pnl_report.py     # coverage, latency distribution, hypothetical PnL
+# the live mirroring loop (leave running)
+python3 executor.py --mainnet
+
+# operational tools
+python3 report.py --loop             # 10-min "AJC did X, vault did Y" digest
+python3 chart.py                     # time-weighted return chart -> vault_pnl.html
+python3 gas.py --status              # treasury / gas tanks
 ```
 
-Vault parameters (paper AUM, max trade fraction, min copy size) are in
-`config.json`. Sizing: `copy_usd = aum * min(trade_usd / trader_ref_capital,
-max_trade_pct)`.
+Config knobs in `config.json`: `vault` (caps, delays), `sleeve` (`auto_bridge`,
+buffer %, min bridge size), `gas` (refill thresholds, daily cap).
 
-Outputs in `data/`: `trades.jsonl` (normalized trader activity),
-`copy_trades.jsonl` (what the vault would have done, with detection-time fill
-prices and latency-drift bps vs the trader's implied execution price).
+### Production deployment (`deploy/`)
 
-## Solana sleeve (cross-chain execution)
+Run the three processes as supervised systemd services on a small Ubuntu VM
+(auto-restart, boot-persistent, journald logs) instead of a laptop:
 
-The vault's Solana arm follows the fomo pattern: a dedicated Solana address
-per vault, pre-funded so copies execute at detection latency (bridge time only
-affects rebalancing).
-
-- **On-chain (EVM side):** `CopyVault.fundSleeve()` creates a deBridge DLN
-  order itself with the receiver pinned to the owner-set sleeve pubkey — the
-  executor picks timing/size but can never redirect funds. Capped at
-  `sleeveCapBps` of NAV (30%). Mocked DLN on testnet; wire the real DlnSource
-  address on chains where deBridge is live.
-- **Keeper (`sleeve.py`):** every Solana copy signal is quoted through
-  Jupiter (real route + price impact) and logged to `data/sleeve_fills.jsonl`.
-  Paper mode by default; real signing with the sleeve keypair only with
-  `SLEEVE_EXECUTE=1` + `SLEEVE_SOLANA_SECRET` in `.env` (gitignored).
-- **Redemption:** in-kind for Robinhood Chain holdings; the sleeve enters NAV
-  as one line and exits cash-settled, bounded by the cap.
-- Endgame (not built): replace the sleeve keypair with an Anchor program
-  authorized by cross-chain messages — same EVM vault, trust-minimized Solana
-  custody.
-
-## Chain split (measured 2026-08-29, 3-day window)
-
-`solana_watcher.py` watches the trader's ~52 Solana token accounts (fomo's
-co-signer is a delegate, so wallet-level signature queries miss most swaps —
-signatures must be collected per ATA and deduped). Result: **~$33.5K/day
-copyable volume on Robinhood Chain vs ~$1K/day on Solana (~97/3)** for this
-trader. A cross-chain Solana sleeve is not worth building at this split;
-re-check `pnl_report.py` after a week of live data.
-
-## Known limitations (deliberate, prototype)
-
-- Backfilled trades use the trader's implied price as the fill — no latency
-  cost modeled; only live-watched trades measure real drift.
-- Fill model is the dexscreener price at detection: no pool-depth slippage
-  model yet, no gas.
-- Trader `ref_capital_usd` is a config constant (~DeBank total), not live.
-- Quote-vs-asset leg classification and funding-vs-trade classification use
-  liquidity heuristics; check `trades.jsonl` when something looks off.
-- Solana side is watch-only and currently not ingested at all.
-
-## Phase 2: the vault contract (`contracts/`)
-
-`CopyVault.sol` — the pooled vault whose shares are the "vault token":
-
-- **Deposits** in one asset (USDC-style); shares priced off a keeper-posted
-  NAV with a freshness TTL (stale NAV blocks deposits, never exits).
-- **`mirrorTrade()`** — executor-only, one side must be the asset, buys capped
-  at `maxTradeBps` of NAV and restricted to an owner-set token allowlist,
-  `minOut` slippage bound, sells only of actually-held positions.
-- **In-kind redemption** — burning shares pays a pro-rata slice of the asset
-  and every held token, so exits never depend on NAV pricing (the main
-  NAV-manipulation surface is gone by construction). Plus a withdraw delay.
-
-No performance fees yet; executor/owner are fully trusted (prototype).
-
-```
-forge test --root contracts                    # 12 tests
-anvil &                                        # or use the Robinhood testnet
-forge script contracts/script/Demo.s.sol --root contracts \
-  --rpc-url http://127.0.0.1:8545 --private-key <key> --broadcast
+```bash
+bash deploy/migrate.sh root@YOUR.VM.IP    # stops local procs, syncs, starts services
 ```
 
-Testnet (chain id 46630, RPC `https://rpc.testnet.chain.robinhood.com`,
-explorer `explorer.testnet.chain.robinhood.com`): throwaway deployer key in
-`contracts/.env` (gitignored); fund it at
-`https://faucet.testnet.chain.robinhood.com`, then run
-`script/Deploy.s.sol` with `--rpc-url $TESTNET_RPC`.
+See `deploy/README-deploy.md`. Contracts: `forge test --root contracts`
+(includes mainnet fork tests against live Uniswap V3/V4 pools).
 
-**The loop is closed by `executor.py`**: it tails `data/copy_trades.jsonl`
-and, for each live Robinhood Chain copy signal (≤10 min old), deploys a
-testnet mock for any unseen token (allowlisting it and pinning the mock
-router's rate to the real token's live price), posts NAV computed from actual
-on-chain holdings, sizes against on-chain NAV, and sends `mirrorTrade()` with
-the keeper key. Executions land in `data/executions.jsonl`.
+## Trust & risk
 
-```
-python executor.py --test   # inject one synthetic buy, then follow live
-python executor.py          # follow live signals
-```
+Deliberately honest about what this is:
 
-**Initial sync (Hyperliquid-style):** `sync.py` brings the vault to the
-trader's current portfolio weights before flow-mirroring takes over — fetches
-the live book from Blockscout, computes weights (stables = cash), and
-buys/sells in clips within the vault's 5% per-trade cap. Idempotent; rerun to
-correct drift. `--dry-run` prints the plan. Pause `executor.py` while it runs
-(same keeper key — nonce collisions).
+- **Unaudited.** Two adversarial review passes (see git history) found and
+  fixed real bugs; that is not an audit.
+- **Single trusted keeper key**, stored as a plaintext file. A compromised key
+  can make bad-but-bounded trades (allowlist + 5% cap + pinned bridge receiver)
+  but **cannot block your in-kind redemption** — that's the guarantee that
+  matters. KMS/HSM custody is the pre-outside-money upgrade.
+- **NAV is keeper-posted** from dexscreener prices — the residual manipulation
+  surface (deposits only; exits are in-kind). On-chain NAV bounds are a
+  known TODO before outside depositors.
+- **Concentrated & young.** This trader is heavily single-token (PONS); returns
+  reflect a short, concentrated window.
+- **Not compliant advice or a solicitation.** A pooled discretionary vehicle
+  for other people's money has regulatory implications not addressed here.
+
+## Roadmap
+
+- Supervised VM (kit built in `deploy/`) — the immediate operational step.
+- On-chain NAV sanity bounds; performance fee (high-water mark).
+- Anchor program to replace sleeve-keypair custody (trust-minimized Solana).
+- Vault factory + registry for "any fomo trader"; automated handle→wallet
+  resolution; trader opt-in/staking (Hyperliquid-style anti-gaming).
+- Dedicated RPC endpoint (the public one lags across replicas).
