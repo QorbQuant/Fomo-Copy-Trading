@@ -153,17 +153,28 @@ class Executor:
 
     # ------------------------------------------------------------ tokens
 
+    # Broken-route flags live in their OWN file, read fresh on every check —
+    # never cached in process memory, so no stale save can resurrect them.
+    def _broken_file(self):
+        return lib.data_dir(self.cfg) / "broken_routes.json"
+
+    def _broken_map(self):
+        p = self._broken_file()
+        try:
+            return json.loads(p.read_text()) if p.exists() else {}
+        except ValueError:
+            return {}
+
     def mark_broken(self, real_addr, hours=6):
-        tok = self.state["token_map"].get(real_addr)
-        if tok:
-            tok["broken_until"] = time.time() + hours * 3600
-            self.save()
+        m = self._broken_map()
+        m[real_addr.lower()] = time.time() + hours * 3600
+        self._broken_file().write_text(json.dumps(m))
 
     def ensure_token(self, real_addr, symbol, price):
-        tok = self.state["token_map"].get(real_addr)
-        if tok is not None and tok.get("broken_until", 0) > time.time():
+        if self._broken_map().get(real_addr.lower(), 0) > time.time():
             raise RuntimeError(f"{symbol} route marked broken (execution-level token "
                                f"failure), retrying after cooldown")
+        tok = self.state["token_map"].get(real_addr)
         if self.mainnet and tok is not None and "legs_buy" not in tok:
             tok = None  # stale pre-RouteAdapter entry: rediscover and re-set routes
         if tok is None:
