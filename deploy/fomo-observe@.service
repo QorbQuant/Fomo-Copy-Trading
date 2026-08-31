@@ -9,7 +9,9 @@ WorkingDirectory=/home/fomo/fomo-copy-vault
 Environment=PATH=/home/fomo/.foundry/bin:/usr/local/bin:/usr/bin:/bin
 # Watch-only: writes paper copy records tagged with the chain. The executor
 # ignores every non-home-chain record, so nothing here spends funds.
-ExecStart=/usr/bin/python3 /home/fomo/fomo-copy-vault/watcher.py --chain %i
+# --no-backfill: start from head. Observation is forward-looking, and it
+# sidesteps public-RPC getLogs range caps that only bite on wide backfill scans.
+ExecStart=/usr/bin/python3 /home/fomo/fomo-copy-vault/watcher.py --chain %i --no-backfill
 Restart=always
 RestartSec=15
 StandardOutput=journal

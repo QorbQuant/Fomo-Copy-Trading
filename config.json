@@ -24,7 +24,8 @@
       "name": "monad", "chain_id": 143, "role": "observe",
       "rpc": "https://rpc.monad.xyz",
       "dexscreener_chain_id": "monad",
-      "backfill_blocks": 200000, "log_chunk_blocks": 10000, "poll_seconds": 5
+      "_note": "public RPC has a tiny getLogs range cap; minimal backfill, follow forward",
+      "backfill_blocks": 2000, "log_chunk_blocks": 500, "poll_seconds": 4
     },
     "bnb": {
       "name": "bnb", "chain_id": 56, "role": "observe",
@@ -34,7 +35,7 @@
     },
     "ethereum": {
       "name": "ethereum", "chain_id": 1, "role": "observe",
-      "rpc": "https://ethereum-rpc.publicnode.com",
+      "rpc": "https://eth.drpc.org",
       "dexscreener_chain_id": "ethereum",
       "backfill_blocks": 7200, "log_chunk_blocks": 2000, "poll_seconds": 12
     }

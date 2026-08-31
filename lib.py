@@ -56,6 +56,32 @@ def pad_address(addr):
     return "0x" + addr.lower().replace("0x", "").rjust(64, "0")
 
 
+_LOG_LIMIT_HINTS = ("limit exceeded", "range", "too large", "too many",
+                    "response size", "query returned more", "-32005", "block range")
+
+
+def _get_logs_adaptive(rpc_url, topics, from_block, to_block):
+    """eth_getLogs with automatic range-splitting: public RPCs cap the block
+    range / result count differently per chain, so on a limit error we halve
+    the range and recurse instead of hard-coding a per-chain chunk size."""
+    params = {"fromBlock": hex(from_block), "toBlock": hex(to_block), "topics": topics}
+    try:
+        return rpc(rpc_url, "eth_getLogs", [params], retries=2)
+    except (RuntimeError, requests.HTTPError) as e:
+        is_size = any(h in str(e).lower() for h in _LOG_LIMIT_HINTS) or (
+            isinstance(e, requests.HTTPError) and getattr(e.response, "status_code", 0)
+            in (413, 400))
+        if not is_size:
+            raise
+        if to_block - from_block <= 25:
+            # RPC caps below a usable range — skip this slice rather than hang
+            print(f"  [warn] getLogs cap too low, skipping blocks {from_block}-{to_block}")
+            return []
+        mid = (from_block + to_block) // 2
+        return (_get_logs_adaptive(rpc_url, topics, from_block, mid)
+                + _get_logs_adaptive(rpc_url, topics, mid + 1, to_block))
+
+
 def get_transfer_logs(rpc_url, address, from_block, to_block):
     """All ERC-20 Transfer logs where `address` is sender or recipient.
 
@@ -63,10 +89,9 @@ def get_transfer_logs(rpc_url, address, from_block, to_block):
     so we must filter on Transfer topics, not on tx.from.
     """
     logs = []
-    base = {"fromBlock": hex(from_block), "toBlock": hex(to_block)}
     for topics in ([TRANSFER_TOPIC, pad_address(address)],
                    [TRANSFER_TOPIC, None, pad_address(address)]):
-        logs.extend(rpc(rpc_url, "eth_getLogs", [{**base, "topics": topics}]))
+        logs.extend(_get_logs_adaptive(rpc_url, topics, from_block, to_block))
     seen = set()
     unique = []
     for lg in logs:
