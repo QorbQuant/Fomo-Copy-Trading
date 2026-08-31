@@ -1,0 +1,20 @@
+[Unit]
+Description=fomo copy-vault: satellite executor for %i (keeper swaps USDC via that chain's Uniswap)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=fomo
+WorkingDirectory=/home/fomo/fomo-copy-vault
+Environment=PATH=/home/fomo/.foundry/bin:/usr/local/bin:/usr/bin:/bin
+# SLEEVE_EXECUTE=1 arms LIVE swaps. Only enable this instance once the keeper
+# is funded (USDC + gas) on %i and the chain is marked "live" in config.json.
+Environment=SLEEVE_EXECUTE=1
+ExecStart=/usr/bin/python3 /home/fomo/fomo-copy-vault/satellite.py --chain %i
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

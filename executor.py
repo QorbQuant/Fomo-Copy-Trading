@@ -427,6 +427,17 @@ class Executor:
                 except Exception as e:
                     print(f"  [exec warn] sleeve valuation failed, NAV excludes sleeve: {e}")
             nav += self.bridge_pending_usd()  # in-flight DLN escrow is still vault value
+            # satellite chains marked live: keeper's USDC + positions there are
+            # vault capital deployed cross-chain. Gated on "live" so an unfunded
+            # or dry-run satellite never touches the NAV path.
+            for sname, scfg in self.cfg.get("satellites", {}).items():
+                if not scfg.get("live"):
+                    continue
+                try:
+                    import satellite as sat_mod
+                    nav += sat_mod.Satellite(sname).keeper_holdings_usd()
+                except Exception as e:
+                    print(f"  [exec warn] satellite {sname} valuation failed, NAV excludes it: {e}")
         else:
             nav += uint(self.call(self.dep["vault"], "sleeveFundedAsset()(uint256)")) / 1e6
         for real_addr, tok in self.state["token_map"].items():
