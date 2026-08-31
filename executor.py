@@ -142,6 +142,10 @@ class Executor:
                 out = json.loads(run(cmd))
                 break
             except RuntimeError as e:
+                if "gas required exceeds allowance" in str(e):
+                    raise RuntimeError(
+                        f"KEEPER OUT OF GAS — send ETH to {E['DEPLOYER']} on Robinhood "
+                        f"Chain (balance covers almost nothing)") from None
                 if "estimate gas" in str(e) and attempt < 2:
                     print(f"  [send retry] estimation failed (lagged replica?), retrying...")
                     time.sleep(4)
@@ -668,9 +672,17 @@ class Executor:
 
     # ------------------------------------------------------------ loop
 
+    def gas_check(self):
+        bal = int(run(["cast", "balance", E["DEPLOYER"], "--rpc-url", self.rpc])) / 1e18
+        if bal < 0.002:
+            print(f"  [exec] *** LOW KEEPER GAS: {bal:.5f} ETH — top up "
+                  f"{E['DEPLOYER']} soon (DLN bridge fee alone is 0.001) ***")
+        return bal
+
     def follow(self):
         if not self.dep.get("vault"):
             raise SystemExit("deployments.json has no vault for this environment — deploy first")
+        self.gas_check()
         src = lib.data_dir(self.cfg) / "copy_trades.jsonl"
         print(f"Executor ({'MAINNET' if self.mainnet else 'testnet'}) following {src} "
               f"against vault {self.dep['vault']}")
