@@ -46,6 +46,15 @@
     "solana_address": "H2QSGECp13sFLJgdTsDtayX3dk18Dm6sQMSQKcew7Xzk",
     "ref_capital_usd": 1800000
   },
+  "_comment_cctp": "Circle CCTP V2 rail (native USDC burn-and-mint). TokenMessengerV2/MessageTransmitterV2 are the same on all EVM chains (in cctp.py). Robinhood Chain has NO CCTP domain — it uses deBridge. Arc mainnet addresses publish at the Sept 16 launch; fill arc.rpc/usdc then and it works.",
+  "cctp": {
+    "testnet": false,
+    "chains": {
+      "ethereum": {"domain": 0, "rpc": "https://eth.drpc.org", "usdc": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "fast": true},
+      "base": {"domain": 6, "rpc": "https://mainnet.base.org", "usdc": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "fast": true},
+      "arc": {"domain": 26, "rpc": "", "usdc": "", "fast": true, "_note": "fill rpc + native USDC address at Sept 16 mainnet launch"}
+    }
+  },
   "gas": {
     "auto_refill": true,
     "evm_min_eth": 0.003,
