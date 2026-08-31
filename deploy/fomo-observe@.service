@@ -1,0 +1,19 @@
+[Unit]
+Description=fomo copy-vault: observation watcher for %i (paper only, no execution)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=fomo
+WorkingDirectory=/home/fomo/fomo-copy-vault
+Environment=PATH=/home/fomo/.foundry/bin:/usr/local/bin:/usr/bin:/bin
+# Watch-only: writes paper copy records tagged with the chain. The executor
+# ignores every non-home-chain record, so nothing here spends funds.
+ExecStart=/usr/bin/python3 /home/fomo/fomo-copy-vault/watcher.py --chain %i
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

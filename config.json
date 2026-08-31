@@ -6,6 +6,39 @@
     "blockscout": "https://robinhoodchain.blockscout.com",
     "dexscreener_chain_id": "robinhood"
   },
+  "_comment_chains": "Observation registry for multi-chain watching (Phase 1, paper only). AJC is the SAME EVM address on every chain (EIP-7702, verified on Base+Monad). 'home' = the vault chain (executes for real); others are watch-only until execution infra is built per chain.",
+  "chains": {
+    "robinhood": {
+      "name": "robinhood", "chain_id": 4663, "role": "home",
+      "rpc": "https://rpc.mainnet.chain.robinhood.com",
+      "dexscreener_chain_id": "robinhood",
+      "backfill_blocks": 900000, "log_chunk_blocks": 200000, "poll_seconds": 3
+    },
+    "base": {
+      "name": "base", "chain_id": 8453, "role": "observe",
+      "rpc": "https://mainnet.base.org",
+      "dexscreener_chain_id": "base",
+      "backfill_blocks": 43200, "log_chunk_blocks": 5000, "poll_seconds": 5
+    },
+    "monad": {
+      "name": "monad", "chain_id": 143, "role": "observe",
+      "rpc": "https://rpc.monad.xyz",
+      "dexscreener_chain_id": "monad",
+      "backfill_blocks": 200000, "log_chunk_blocks": 10000, "poll_seconds": 5
+    },
+    "bnb": {
+      "name": "bnb", "chain_id": 56, "role": "observe",
+      "rpc": "https://bsc-dataseed.binance.org",
+      "dexscreener_chain_id": "bsc",
+      "backfill_blocks": 28800, "log_chunk_blocks": 5000, "poll_seconds": 5
+    },
+    "ethereum": {
+      "name": "ethereum", "chain_id": 1, "role": "observe",
+      "rpc": "https://ethereum-rpc.publicnode.com",
+      "dexscreener_chain_id": "ethereum",
+      "backfill_blocks": 7200, "log_chunk_blocks": 2000, "poll_seconds": 12
+    }
+  },
   "trader": {
     "handle": "AvgJoesCrypto",
     "evm_address": "0x06de9c48b1e639ed5c13ec8fbd4080a38e39f2d1",

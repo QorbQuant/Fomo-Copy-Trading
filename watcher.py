@@ -75,7 +75,7 @@ def normalize_tx(cfg, tx_hash, logs, detected_at, backfill):
     block = int(logs[0]["blockNumber"], 16)
     block_time = lib.block_timestamp(rpc_url, logs[0]["blockNumber"])
     base = {
-        "chain": "robinhood", "dex_chain": chain_slug,
+        "chain": cfg["chain"]["name"], "dex_chain": chain_slug,
         "tx_hash": tx_hash, "block": block, "block_time": block_time,
         "detected_at": round(detected_at, 3), "backfill": backfill,
         "latency_s": None if backfill else round(detected_at - block_time, 3),
@@ -156,13 +156,30 @@ def _print_trade(trade, rec):
           f"(${(trade['usd_value'] or 0):,.0f}){tag}{lat} -> {copied}")
 
 
+def select_chain(cfg):
+    """`--chain <name>` swaps cfg['chain'] for a registry entry so one watcher
+    process observes one chain. Default keeps the legacy robinhood config.
+    Returns the state-file suffix."""
+    if "--chain" in sys.argv:
+        name = sys.argv[sys.argv.index("--chain") + 1]
+        chain = cfg["chains"][name]
+        cfg["chain"] = {**cfg["chain"], **chain}  # inherit blockscout etc, override
+        # per-chain watcher tuning falls back to the global block if absent
+        for k in ("backfill_blocks", "log_chunk_blocks", "poll_seconds"):
+            if k in chain:
+                cfg["watcher"][k] = chain[k]
+        return f"_{name}"
+    return ""
+
+
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
     cfg = lib.load_config()
+    suffix = select_chain(cfg)
     rpc_url = cfg["chain"]["rpc"]
     d = lib.data_dir(cfg)
-    state_file = d / "state.json"
+    state_file = d / f"state{suffix}.json"
 
     def save(block):
         state_file.write_text(json.dumps({"last_block": block}))
