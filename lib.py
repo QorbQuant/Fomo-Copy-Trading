@@ -74,6 +74,30 @@ def data_dir(cfg):
     return d
 
 
+def funding_requests_dir(cfg):
+    """Satellites drop funding requests here; the executor (sole owner of the
+    home-chain nonce) fulfills them via the vault's fundDestination. One file
+    per destination chain id."""
+    d = data_dir(cfg) / "funding_requests"
+    d.mkdir(exist_ok=True)
+    return d
+
+
+def request_satellite_funding(cfg, chain_name, chain_id, usd):
+    """Accumulate a JIT funding request for a satellite chain."""
+    p = funding_requests_dir(cfg) / f"{chain_id}.json"
+    prev = {}
+    if p.exists():
+        try:
+            prev = json.loads(p.read_text())
+        except ValueError:
+            prev = {}
+    p.write_text(json.dumps({
+        "chain": chain_name, "chain_id": chain_id,
+        "usd": max(prev.get("usd", 0), usd), "ts": time.time(),
+        "bridged_at": prev.get("bridged_at", 0)}))
+
+
 def append_jsonl(path, obj):
     with open(path, "a") as f:
         f.write(json.dumps(obj, separators=(",", ":")) + "\n")

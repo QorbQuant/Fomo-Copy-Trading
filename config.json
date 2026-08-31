@@ -50,6 +50,7 @@
   "satellites": {
     "base": {
       "rpc": "https://mainnet.base.org",
+      "chain_id": 8453,
       "dexscreener_chain_id": "base",
       "usdc": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
       "weth": "0x4200000000000000000000000000000000000006",

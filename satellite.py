@@ -168,6 +168,17 @@ class Satellite:
         if rec["side"] == "buy":
             if usd < MIN_TRADE_USD:
                 return
+            # JIT funding: if the keeper is short USDC on this chain, ask the
+            # executor to bridge a chunk (it amortizes the bridge fee over many
+            # trades) and defer this buy until the funds land.
+            have = uint(self.call(self.usdc, "balanceOf(address)(uint256)", E["DEPLOYER"])) / 1e6
+            if have < usd and not dry:
+                # request a chunk sized to serve a run of trades, not just this one
+                chunk = max(usd * 8, self.cfg["sleeve"].get("rotation_bridge_min_usd", 200))
+                lib.request_satellite_funding(self.cfg, self.name, self.dex["chain_id"], chunk)
+                print(f"  [{self.name}] awaiting funding: need ${usd:.2f}, have ${have:.2f} "
+                      f"(requested ${chunk:.0f} chunk)")
+                return
             amount_in = int(usd * 1e6)
             min_out = int(self.quote(tok["path_buy"], amount_in) * (1 - SLIPPAGE))
             action = f"buy ${usd:,.2f} {tok['symbol']} (minOut {min_out})"

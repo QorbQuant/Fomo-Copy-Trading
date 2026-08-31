@@ -473,6 +473,10 @@ class Executor:
                 gas.maintain(self.cfg)
             except Exception as e:
                 print(f"  [exec warn] gas maintenance failed: {e}")
+            try:
+                self.fund_satellite_requests()
+            except Exception as e:
+                print(f"  [exec warn] satellite funding check failed: {e}")
         return nav
 
     # ------------------------------------------------------------ bridging
@@ -615,6 +619,67 @@ class Executor:
                                          "usd": round(usd, 2), "arrived": round(arrived, 2),
                                          "sig": str(sig)})
         return arrived
+
+    def fund_satellite_requests(self):
+        """Fulfill satellite JIT funding requests via the vault's fundDestination
+        (deBridge to the keeper on that chain). Only bridges when the shortfall
+        clears the economic floor, so bridge fees are amortized over a chunk."""
+        scfg = self.cfg.get("sleeve", {})
+        floor = scfg.get("rotation_bridge_min_usd", 200)
+        import sleeve as sleeve_mod
+        for req_file in lib.funding_requests_dir(self.cfg).glob("*.json"):
+            try:
+                req = json.loads(req_file.read_text())
+            except ValueError:
+                continue
+            if time.time() - req.get("ts", 0) > 3600:
+                req_file.unlink()  # stale demand
+                continue
+            chain_id = req["chain_id"]
+            sat = self.cfg.get("satellites", {}).get(req["chain"])
+            if not sat:
+                continue
+            # already funded? clear it
+            have = uint(self.call(sat["usdc"], "balanceOf(address)(uint256)", E["DEPLOYER"])) / 1e6
+            if have >= req["usd"]:
+                req_file.unlink()
+                continue
+            # destination configured on the vault?
+            _, _, cap, _, dset = self._destination(chain_id)
+            if not dset:
+                print(f"  [exec] satellite {req['chain']} needs funding but v2 destination "
+                      f"{chain_id} not configured")
+                continue
+            if time.time() - req.get("bridged_at", 0) < 900:  # an order is in flight
+                continue
+            short = req["usd"] - have
+            vault_cash = uint(self.call(self.asset_addr(), "balanceOf(address)(uint256)",
+                                        self.dep["vault"])) / 1e6
+            amount = min(short, max(vault_cash - 1, 0))
+            if amount < floor:
+                continue  # uneconomic — wait for more demand or more cash
+            fee = uint(self.call("0xeF4fB24aD0916217251F553c0596F8Edc630EB66",
+                                 "globalFixedNativeFee()(uint88)"))
+            try:
+                tx = self.send(self.dep["vault"], "fundDestination(uint256,uint256,uint256)",
+                               chain_id, int(amount * 1e6), int(amount * 0.97 * 1e6), value=str(fee))
+                req["bridged_at"] = time.time()
+                req_file.write_text(json.dumps(req))
+                lib.append_jsonl(self.exec_log, {"ts": round(time.time(), 3), "kind": "satellite_fund",
+                                                 "chain": req["chain"], "usd": round(amount, 2), "vault_tx": tx})
+                print(f"  [exec] funding {req['chain']} satellite: ${amount:,.2f} USDG->USDC ({tx[:12]})")
+            except Exception as e:
+                print(f"  [exec warn] satellite {req['chain']} funding failed: {str(e)[:100]}")
+
+    def _destination(self, chain_id):
+        out = self.call(self.dep["vault"],
+                        "destination(uint256)(bytes,bytes,uint256,uint256,bool)", chain_id).splitlines()
+        # (receiver, takeToken, capBps, fundedAsset, set)
+        recv = out[0].strip() if len(out) > 0 else "0x"
+        cap = uint(out[2]) if len(out) > 2 else 0
+        funded = uint(out[3]) if len(out) > 3 else 0
+        dset = "true" in out[4].lower() if len(out) > 4 else False
+        return recv, None, cap, funded, dset
 
     def sleeve_configured(self):
         if getattr(self, "_sleeve_ok", None) is None:
