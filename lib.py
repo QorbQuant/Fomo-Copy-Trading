@@ -161,11 +161,16 @@ def token_price_info(token, chain_slug):
     now = time.time()
     if key in _price_cache and now - _price_cache[key][0] < PRICE_TTL:
         return _price_cache[key][1]
-    info = {"price": None, "liquidity": 0.0, "symbol": None, "volume24h": 0.0}
+    info = {"price": None, "liquidity": 0.0, "symbol": None, "volume24h": 0.0,
+            "buys24h": 0, "sells24h": 0}
     try:
         r = _session.get(f"https://api.dexscreener.com/latest/dex/tokens/{token}", timeout=15)
         r.raise_for_status()
         pairs = [p for p in (r.json().get("pairs") or []) if p.get("chainId") == chain_slug]
+        # aggregate sells across ALL pairs — a honeypot check must see the whole
+        # token, not just its deepest pool
+        buys24 = sum((p.get("txns", {}).get("h24", {}) or {}).get("buys") or 0 for p in pairs)
+        sells24 = sum((p.get("txns", {}).get("h24", {}) or {}).get("sells") or 0 for p in pairs)
         best = None
         for p in pairs:
             liq = (p.get("liquidity") or {}).get("usd") or 0
@@ -185,7 +190,7 @@ def token_price_info(token, chain_slug):
                 best = (liq, float(px), sym, vol)
         if best:
             info = {"price": best[1], "liquidity": best[0], "symbol": best[2],
-                    "volume24h": best[3]}
+                    "volume24h": best[3], "buys24h": buys24, "sells24h": sells24}
     except requests.RequestException:
         pass
     _price_cache[key] = (now, info)
@@ -198,3 +203,17 @@ def _addr_eq(a, b):
 
 def price_usd(token, chain_slug):
     return token_price_info(token, chain_slug)["price"]
+
+
+def honeypot_reason(info):
+    """Return a reason string if a token looks unsellable / spoof-baited, else
+    None. Guards against honeypots (buyable, not sellable) and tokens seeded
+    into the trader's wallet to fake a buy — both show as near-zero sells
+    despite many buys. Outcome-based, so it catches the trap regardless of
+    whether the trade was real or spoofed."""
+    b, s = info.get("buys24h", 0), info.get("sells24h", 0)
+    if b >= 10 and s == 0:
+        return f"0 sells against {b} buys (honeypot signature)"
+    if b >= 30 and s > 0 and b / s > 25:
+        return f"buys/sells {b}/{s} = {b/s:.0f}x (near-unsellable)"
+    return None

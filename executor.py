@@ -671,6 +671,10 @@ class Executor:
                 self._log_skip(rec, f"untrusted: ${rec['trader_usd']:,.0f} vs pool "
                                     f"${info['liquidity']:,.0f}")
                 return
+            hp = lib.honeypot_reason(info)
+            if hp:
+                self._log_skip(rec, f"honeypot: {hp}")
+                return
         tok = self.ensure_token(rec["asset_address"], rec["asset_symbol"], price)
         self.post_nav(force=True)
         nav = self.compute_nav_usd()

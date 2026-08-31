@@ -156,6 +156,11 @@ class Satellite:
         price = rec.get("detection_price_usd") or rec.get("trader_implied_price_usd")
         if not price or not rec.get("trader_usd"):
             return
+        if rec["side"] == "buy":
+            hp = lib.honeypot_reason(lib.token_price_info(rec["asset_address"], self.slug))
+            if hp:
+                print(f"  [{self.name}] honeypot skip {rec['asset_symbol']}: {hp}")
+                return
         tok = self.ensure_token(rec["asset_address"], rec["asset_symbol"])
         frac = min(rec["trader_usd"] / self.cfg["trader"]["ref_capital_usd"], MAX_TRADE_FRACTION)
         usd = nav * frac

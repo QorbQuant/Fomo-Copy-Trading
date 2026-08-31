@@ -1,0 +1,444 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>AJC vs Vault</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:#f5f6f8; --panel:#ffffff; --panel2:#f0f1f4; --line:#e2e4e9;
+  --ink:#12151c; --ink2:#5a6072; --ink3:#8a90a0;
+  --trader:#e08a1e; --trader-dim:#f6e6cf; --vault:#0e9591; --vault-dim:#d3ecea;
+  --up:#0a8a4a; --down:#d6483b; --warn:#c98a10;
+  --mono:"IBM Plex Mono", ui-monospace, monospace;
+  --sans:"IBM Plex Sans", system-ui, sans-serif;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg:#0c0e13; --panel:#14171f; --panel2:#1b1f29; --line:#262b37;
+  --ink:#eef0f4; --ink2:#a2a9ba; --ink3:#6b7284;
+  --trader:#f2a63d; --trader-dim:#33280f; --vault:#2bc0bb; --vault-dim:#0d2b2a;
+  --up:#3fbb6f; --down:#f2675a; --warn:#e0a52a;
+} }
+:root[data-theme="dark"] {
+  --bg:#0c0e13; --panel:#14171f; --panel2:#1b1f29; --line:#262b37;
+  --ink:#eef0f4; --ink2:#a2a9ba; --ink3:#6b7284;
+  --trader:#f2a63d; --trader-dim:#33280f; --vault:#2bc0bb; --vault-dim:#0d2b2a;
+  --up:#3fbb6f; --down:#f2675a; --warn:#e0a52a;
+}
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--ink); font-family:var(--sans);
+  font-size:14px; line-height:1.5; -webkit-font-smoothing:antialiased; }
+.wrap { max-width:1080px; margin:0 auto; padding:26px 18px 60px; }
+.mono { font-family:var(--mono); font-variant-numeric:tabular-nums; }
+header { display:flex; justify-content:space-between; align-items:baseline;
+  flex-wrap:wrap; gap:8px; margin-bottom:20px; }
+h1 { font-size:1.35rem; font-weight:700; margin:0; letter-spacing:-.01em; }
+h1 .a { color:var(--trader); } h1 .b { color:var(--vault); }
+.updated { color:var(--ink3); font-size:.8rem; font-family:var(--mono); }
+.tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+  gap:12px; margin-bottom:22px; }
+.tile { background:var(--panel); border:1px solid var(--line); border-radius:12px;
+  padding:14px 16px; }
+.tile .k { color:var(--ink2); font-size:.72rem; text-transform:uppercase;
+  letter-spacing:.06em; }
+.tile .v { font-family:var(--mono); font-size:1.6rem; font-weight:600; margin-top:3px;
+  letter-spacing:-.02em; }
+.tile .v.up { color:var(--up); } .tile .v.down { color:var(--down); }
+.tile .sub { color:var(--ink3); font-size:.74rem; margin-top:1px; }
+.tile.cov .v { color:var(--vault); }
+.grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+@media (max-width:720px) { .grid { grid-template-columns:1fr; } }
+.panel { background:var(--panel); border:1px solid var(--line); border-radius:14px;
+  padding:16px 16px 8px; }
+.phead { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+.dot { width:9px; height:9px; border-radius:50%; }
+.dot.t { background:var(--trader); } .dot.v { background:var(--vault); }
+.phead h2 { font-size:.95rem; margin:0; font-weight:600; }
+.phead .big { margin-left:auto; font-family:var(--mono); font-size:1.15rem;
+  font-weight:600; }
+.nets { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0 12px; }
+.chip { font-size:.72rem; font-family:var(--mono); padding:3px 8px; border-radius:20px;
+  background:var(--panel2); color:var(--ink2); border:1px solid var(--line); }
+.chip b { color:var(--ink); font-weight:600; }
+.chip.t b { color:var(--trader); } .chip.v b { color:var(--vault); }
+.prow { display:grid; grid-template-columns:1fr auto auto auto; gap:10px;
+  align-items:baseline; padding:5px 0; border-top:1px solid var(--line);
+  font-family:var(--mono); font-size:.82rem; }
+.prow:first-of-type { border-top:0; }
+.psym { font-family:var(--sans); font-weight:600; }
+.pnet { color:var(--ink3); font-size:.72rem; }
+.pval { color:var(--ink2); }
+.pw { font-weight:600; min-width:44px; text-align:right; }
+section.compare { margin:22px 0; }
+.stitle { font-size:.78rem; text-transform:uppercase; letter-spacing:.07em;
+  color:var(--ink2); margin:0 0 12px; display:flex; gap:14px; align-items:center; }
+.legend { display:flex; gap:12px; margin-left:auto; font-family:var(--mono);
+  font-size:.72rem; text-transform:none; letter-spacing:0; }
+.legend i { width:10px; height:10px; border-radius:2px; display:inline-block;
+  vertical-align:-1px; margin-right:4px; }
+.wrow { display:grid; grid-template-columns:78px 1fr 150px; gap:12px;
+  align-items:center; padding:7px 0; border-top:1px solid var(--line); }
+.wsym { font-weight:600; font-size:.85rem; }
+.wbars { display:flex; flex-direction:column; gap:3px; }
+.wbar { height:7px; background:var(--panel2); border-radius:4px; overflow:hidden; }
+.wbar span { display:block; height:100%; border-radius:4px; }
+.wbar.trader span { background:var(--trader); }
+.wbar.vault span { background:var(--vault); }
+.wnums { font-family:var(--mono); font-size:.76rem; display:flex; gap:8px;
+  justify-content:flex-end; }
+.wnums .tw { color:var(--trader); } .wnums .vw { color:var(--vault); }
+.wnums .drift { min-width:40px; text-align:right; }
+.drift.ok { color:var(--up); } .drift.warn { color:var(--warn); }
+.drift.bad { color:var(--down); }
+.feed { margin-top:6px; }
+.ev { display:grid; grid-template-columns:42px 58px 46px 1fr auto auto; gap:10px;
+  align-items:baseline; padding:6px 0; border-top:1px solid var(--line);
+  font-family:var(--mono); font-size:.8rem; }
+.et { color:var(--ink3); }
+.ewho { font-size:.68rem; text-transform:uppercase; letter-spacing:.04em;
+  padding:1px 6px; border-radius:5px; text-align:center; }
+.ewho.trader { background:var(--trader-dim); color:var(--trader); }
+.ewho.vault { background:var(--vault-dim); color:var(--vault); }
+.eside { font-weight:600; }
+.eside.buy { color:var(--up); } .eside.sell { color:var(--down); }
+.eside.op { color:var(--ink2); }
+.esym { font-family:var(--sans); font-weight:600; }
+.enet { color:var(--ink3); font-size:.72rem; }
+.eval { text-align:right; color:var(--ink2); }
+footer { margin-top:26px; color:var(--ink3); font-size:.74rem; font-family:var(--mono);
+  text-align:center; }
+a { color:var(--vault); }
+</style></head><body><div class="wrap">
+<header>
+  <h1><span class="a">AJC</span> &nbsp;&#8644;&nbsp; <span class="b">Vault</span></h1>
+  <div class="updated">updated Aug 31, 21:16 UTC &middot; @AvgJoesCrypto</div>
+</header>
+
+<div class="tiles">
+  <div class="tile"><div class="k">Trader book</div>
+    <div class="v mono" style="color:var(--trader)">$2,350,273</div>
+    <div class="sub">35 positions, 2 networks</div></div>
+  <div class="tile"><div class="k">Vault NAV</div>
+    <div class="v mono" style="color:var(--vault)">$522</div>
+    <div class="sub">7 positions + sleeve</div></div>
+  <div class="tile cov"><div class="k">Weight coverage</div>
+    <div class="v mono">87%</div>
+    <div class="sub">overlap with trader book</div></div>
+  <div class="tile"><div class="k">Vault return</div><div class="v up">+62.4%</div><div class="sub">time-weighted</div></div>
+</div>
+
+<div class="grid">
+  <div class="panel">
+    <div class="phead"><span class="dot t"></span><h2>AJC &mdash; fomo</h2>
+      <span class="big" style="color:var(--trader)">$2,350,273</span></div>
+    <div class="nets"><span class="chip t">Robinhood <b>90%</b></span><span class="chip t">Solana <b>3%</b></span></div>
+    <div class="prow"><span class="psym">PONS</span><span class="pnet">Robinhood</span><span class="pval">$1,878,529</span><span class="pw">79.9%</span></div><div class="prow"><span class="psym">MOO</span><span class="pnet">Robinhood</span><span class="pval">$55,878</span><span class="pw">2.4%</span></div><div class="prow"><span class="psym">INJOH</span><span class="pnet">Robinhood</span><span class="pval">$53,412</span><span class="pw">2.3%</span></div><div class="prow"><span class="psym">SIT</span><span class="pnet">Robinhood</span><span class="pval">$38,607</span><span class="pw">1.6%</span></div><div class="prow"><span class="psym">PUMPCADE</span><span class="pnet">Solana</span><span class="pval">$35,136</span><span class="pw">1.5%</span></div><div class="prow"><span class="psym">TCG</span><span class="pnet">Solana</span><span class="pval">$26,559</span><span class="pw">1.1%</span></div><div class="prow"><span class="psym">CLIPPY</span><span class="pnet">Robinhood</span><span class="pval">$16,036</span><span class="pw">0.7%</span></div><div class="prow"><span class="psym">BULL</span><span class="pnet">Robinhood</span><span class="pval">$12,391</span><span class="pw">0.5%</span></div>
+  </div>
+  <div class="panel">
+    <div class="phead"><span class="dot v"></span><h2>avgJOE Vault</h2>
+      <span class="big" style="color:var(--vault)">$522</span></div>
+    <div class="nets"><span class="chip v">Robinhood <b>93%</b></span><span class="chip v">Solana <b>7%</b></span></div>
+    <div class="prow"><span class="psym">PONS</span><span class="pnet">Robinhood</span><span class="pval">$415</span><span class="pw">79.4%</span></div><div class="prow"><span class="psym">MOO</span><span class="pnet">Robinhood</span><span class="pval">$12</span><span class="pw">2.3%</span></div><div class="prow"><span class="psym">INJOH</span><span class="pnet">Robinhood</span><span class="pval">$11</span><span class="pw">2.2%</span></div><div class="prow"><span class="psym">SIT</span><span class="pnet">Robinhood</span><span class="pval">$8</span><span class="pw">1.6%</span></div><div class="prow"><span class="psym">CLIPPY</span><span class="pnet">Robinhood</span><span class="pval">$3</span><span class="pw">0.7%</span></div><div class="prow"><span class="psym">BULL</span><span class="pnet">Robinhood</span><span class="pval">$3</span><span class="pw">0.5%</span></div><div class="prow"><span class="psym">MOTION</span><span class="pnet">Robinhood</span><span class="pval">$3</span><span class="pw">0.5%</span></div><div class="prow"><span class="psym">sleeve</span><span class="pnet">Solana</span><span class="pval">$36</span><span class="pw">6.9%</span></div>
+  </div>
+</div>
+
+<section class="compare">
+  <div class="stitle">Position weights &mdash; trader vs vault
+    <span class="legend"><span><i style="background:var(--trader)"></i>trader</span>
+    <span><i style="background:var(--vault)"></i>vault</span>
+    <span>&plusmn; drift</span></span></div>
+  
+        <div class="wrow">
+          <div class="wsym">PONS</div>
+          <div class="wbars">
+            <div class="wbar trader"><span style="width:79.9%"></span></div>
+            <div class="wbar vault"><span style="width:79.4%"></span></div>
+          </div>
+          <div class="wnums">
+            <span class="tw">79.9%</span>
+            <span class="vw">79.4%</span>
+            <span class="drift ok">±0.5</span>
+          </div>
+        </div>
+        <div class="wrow">
+          <div class="wsym">MOO</div>
+          <div class="wbars">
+            <div class="wbar trader"><span style="width:2.4%"></span></div>
+            <div class="wbar vault"><span style="width:2.3%"></span></div>
+          </div>
+          <div class="wnums">
+            <span class="tw">2.4%</span>
+            <span class="vw">2.3%</span>
+            <span class="drift ok">±0.1</span>
+          </div>
+        </div>
+        <div class="wrow">
+          <div class="wsym">INJOH</div>
+          <div class="wbars">
+            <div class="wbar trader"><span style="width:2.3%"></span></div>
+            <div class="wbar vault"><span style="width:2.2%"></span></div>
+          </div>
+          <div class="wnums">
+            <span class="tw">2.3%</span>
+            <span class="vw">2.2%</span>
+            <span class="drift ok">±0.1</span>
+          </div>
+        </div>
+        <div class="wrow">
+          <div class="wsym">SIT</div>
+          <div class="wbars">
+            <div class="wbar trader"><span style="width:1.6%"></span></div>
+            <div class="wbar vault"><span style="width:1.6%"></span></div>
+          </div>
+          <div class="wnums">
+            <span class="tw">1.6%</span>
+            <span class="vw">1.6%</span>
+            <span class="drift ok">±0.0</span>
+          </div>
+        </div>
+        <div class="wrow">
+          <div class="wsym">PUMPCADE</div>
+          <div class="wbars">
+            <div class="wbar trader"><span style="width:1.5%"></span></div>
+            <div class="wbar vault"><span style="width:0.0%"></span></div>
+          </div>
+          <div class="wnums">
+            <span class="tw">1.5%</span>
+            <span class="vw">0.0%</span>
+            <span class="drift ok">±1.5</span>
+          </div>
+        </div>
+        <div class="wrow">
+          <div class="wsym">TCG</div>
+          <div class="wbars">
+            <div class="wbar trader"><span style="width:1.1%"></span></div>
+            <div class="wbar vault"><span style="width:0.0%"></span></div>
+          </div>
+          <div class="wnums">
+            <span class="tw">1.1%</span>
+            <span class="vw">0.0%</span>
+            <span class="drift ok">±1.1</span>
+          </div>
+        </div>
+        <div class="wrow">
+          <div class="wsym">CLIPPY</div>
+          <div class="wbars">
+            <div class="wbar trader"><span style="width:0.7%"></span></div>
+            <div class="wbar vault"><span style="width:0.7%"></span></div>
+          </div>
+          <div class="wnums">
+            <span class="tw">0.7%</span>
+            <span class="vw">0.7%</span>
+            <span class="drift ok">±0.0</span>
+          </div>
+        </div>
+        <div class="wrow">
+          <div class="wsym">BULL</div>
+          <div class="wbars">
+            <div class="wbar trader"><span style="width:0.5%"></span></div>
+            <div class="wbar vault"><span style="width:0.5%"></span></div>
+          </div>
+          <div class="wnums">
+            <span class="tw">0.5%</span>
+            <span class="vw">0.5%</span>
+            <span class="drift ok">±0.0</span>
+          </div>
+        </div>
+        <div class="wrow">
+          <div class="wsym">MOTION</div>
+          <div class="wbars">
+            <div class="wbar trader"><span style="width:0.5%"></span></div>
+            <div class="wbar vault"><span style="width:0.5%"></span></div>
+          </div>
+          <div class="wnums">
+            <span class="tw">0.5%</span>
+            <span class="vw">0.5%</span>
+            <span class="drift ok">±0.0</span>
+          </div>
+        </div>
+</section>
+
+<section class="compare">
+  <div class="stitle">Live activity &mdash; what AJC did, what the vault did</div>
+  <div class="feed">
+        <div class="ev vault">
+          <span class="et">2m</span>
+          <span class="ewho vault">vault</span>
+          <span class="eside sell">sell</span>
+          <span class="esym">PONS</span>
+          <span class="enet">mainnet</span>
+          <span class="eval">$1</span>
+        </div>
+        <div class="ev trader">
+          <span class="et">3m</span>
+          <span class="ewho trader">trader</span>
+          <span class="eside sell">sell</span>
+          <span class="esym">PONS</span>
+          <span class="enet">Robinhood</span>
+          <span class="eval">$995</span>
+        </div>
+        <div class="ev trader">
+          <span class="et">5m</span>
+          <span class="ewho trader">trader</span>
+          <span class="eside buy">buy</span>
+          <span class="esym">rbcat</span>
+          <span class="enet">Robinhood</span>
+          <span class="eval">$15,260</span>
+        </div>
+        <div class="ev trader">
+          <span class="et">7m</span>
+          <span class="ewho trader">trader</span>
+          <span class="eside buy">buy</span>
+          <span class="esym">rbcat</span>
+          <span class="enet">Robinhood</span>
+          <span class="eval">$15,270</span>
+        </div>
+        <div class="ev vault">
+          <span class="et">47m</span>
+          <span class="ewho vault">vault</span>
+          <span class="eside op">skip</span>
+          <span class="esym">PONS</span>
+          <span class="enet">Robinhood</span>
+          <span class="eval">—</span>
+        </div>
+        <div class="ev trader">
+          <span class="et">48m</span>
+          <span class="ewho trader">trader</span>
+          <span class="eside sell">sell</span>
+          <span class="esym">PONS</span>
+          <span class="enet">Robinhood</span>
+          <span class="eval">$1,004</span>
+        </div>
+        <div class="ev trader">
+          <span class="et">60m</span>
+          <span class="ewho trader">trader</span>
+          <span class="eside buy">buy</span>
+          <span class="esym">PONS</span>
+          <span class="enet">Robinhood</span>
+          <span class="eval">$3</span>
+        </div>
+        <div class="ev trader">
+          <span class="et">75m</span>
+          <span class="ewho trader">trader</span>
+          <span class="eside buy">buy</span>
+          <span class="esym">cbSOL</span>
+          <span class="enet">Base</span>
+          <span class="eval">$0</span>
+        </div>
+        <div class="ev vault">
+          <span class="et">1h</span>
+          <span class="ewho vault">vault</span>
+          <span class="eside op">skip</span>
+          <span class="esym">MOO</span>
+          <span class="enet">Robinhood</span>
+          <span class="eval">—</span>
+        </div>
+        <div class="ev vault">
+          <span class="et">1h</span>
+          <span class="ewho vault">vault</span>
+          <span class="eside op">skip</span>
+          <span class="esym">PONS</span>
+          <span class="enet">Robinhood</span>
+          <span class="eval">—</span>
+        </div>
+        <div class="ev trader">
+          <span class="et">1h</span>
+          <span class="ewho trader">trader</span>
+          <span class="eside sell">sell</span>
+          <span class="esym">MOO</span>
+          <span class="enet">Robinhood</span>
+          <span class="eval">$489</span>
+        </div>
+        <div class="ev trader">
+          <span class="et">1h</span>
+          <span class="ewho trader">trader</span>
+          <span class="eside sell">sell</span>
+          <span class="esym">PONS</span>
+          <span class="enet">Robinhood</span>
+          <span class="eval">$1,004</span>
+        </div>
+        <div class="ev trader">
+          <span class="et">2h</span>
+          <span class="ewho trader">trader</span>
+          <span class="eside buy">buy</span>
+          <span class="esym">DJT</span>
+          <span class="enet">Robinhood</span>
+          <span class="eval">$30</span>
+        </div>
+        <div class="ev trader">
+          <span class="et">2h</span>
+          <span class="ewho trader">trader</span>
+          <span class="eside buy">buy</span>
+          <span class="esym">RDDT</span>
+          <span class="enet">Robinhood</span>
+          <span class="eval">$29</span>
+        </div>
+        <div class="ev trader">
+          <span class="et">3h</span>
+          <span class="ewho trader">trader</span>
+          <span class="eside buy">buy</span>
+          <span class="esym">rbcat</span>
+          <span class="enet">Robinhood</span>
+          <span class="eval">$15,014</span>
+        </div>
+        <div class="ev trader">
+          <span class="et">3h</span>
+          <span class="ewho trader">trader</span>
+          <span class="eside buy">buy</span>
+          <span class="esym">rbcat</span>
+          <span class="enet">Robinhood</span>
+          <span class="eval">$15,014</span>
+        </div>
+        <div class="ev vault">
+          <span class="et">3h</span>
+          <span class="ewho vault">vault</span>
+          <span class="eside op">skip</span>
+          <span class="esym">PONS</span>
+          <span class="enet">Robinhood</span>
+          <span class="eval">—</span>
+        </div>
+        <div class="ev trader">
+          <span class="et">3h</span>
+          <span class="ewho trader">trader</span>
+          <span class="eside sell">sell</span>
+          <span class="esym">PONS</span>
+          <span class="enet">Robinhood</span>
+          <span class="eval">$1,002</span>
+        </div>
+        <div class="ev vault">
+          <span class="et">3h</span>
+          <span class="ewho vault">vault</span>
+          <span class="eside op">skip</span>
+          <span class="esym">MOO</span>
+          <span class="enet">Robinhood</span>
+          <span class="eval">—</span>
+        </div>
+        <div class="ev vault">
+          <span class="et">3h</span>
+          <span class="ewho vault">vault</span>
+          <span class="eside sell">sell</span>
+          <span class="esym">PONS</span>
+          <span class="enet">mainnet</span>
+          <span class="eval">$1</span>
+        </div>
+        <div class="ev trader">
+          <span class="et">3h</span>
+          <span class="ewho trader">trader</span>
+          <span class="eside sell">sell</span>
+          <span class="esym">MOO</span>
+          <span class="enet">Robinhood</span>
+          <span class="eval">$775</span>
+        </div>
+        <div class="ev trader">
+          <span class="et">3h</span>
+          <span class="ewho trader">trader</span>
+          <span class="eside sell">sell</span>
+          <span class="esym">PONS</span>
+          <span class="enet">Robinhood</span>
+          <span class="eval">$994</span>
+        </div></div>
+</section>
+
+<footer>vault 0xd6A56e55&hellip;99AC0c on Robinhood Chain &middot;
+mirroring across Robinhood, Solana</footer>
+</div></body></html>

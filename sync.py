@@ -61,10 +61,11 @@ def fetch_trader_portfolio(cfg):
         if is_funding_token(leg):
             cash += usd
             continue
+        hp = lib.honeypot_reason(info)
         if (info["liquidity"] < MIN_BOOK_LIQUIDITY
-                or usd > info["liquidity"] * MAX_POSITION_VS_LIQUIDITY):
+                or usd > info["liquidity"] * MAX_POSITION_VS_LIQUIDITY or hp):
             excluded.append({"addr": taddr, "symbol": symbol, "usd": usd,
-                             "liquidity": info["liquidity"]})
+                             "liquidity": info["liquidity"], "reason": hp or "thin/oversized"})
             continue
         positions.append({"addr": taddr, "symbol": symbol, "usd": usd, "price": info["price"],
                           "chain": "robinhood"})
@@ -88,10 +89,11 @@ def fetch_trader_portfolio(cfg):
                 continue
             usd = amt * info["price"]
             symbol = info["symbol"] or mint[:6]
+            hp = lib.honeypot_reason(info)
             if (info["liquidity"] < MIN_BOOK_LIQUIDITY
-                    or usd > info["liquidity"] * MAX_POSITION_VS_LIQUIDITY):
+                    or usd > info["liquidity"] * MAX_POSITION_VS_LIQUIDITY or hp):
                 excluded.append({"addr": mint, "symbol": symbol, "usd": usd,
-                                 "liquidity": info["liquidity"]})
+                                 "liquidity": info["liquidity"], "reason": hp or "thin/oversized"})
                 continue
             positions.append({"addr": mint, "symbol": symbol, "usd": usd,
                               "price": info["price"], "chain": "solana",

@@ -142,6 +142,14 @@ def handle_copy(cfg, trade, rec):
 
     decimals = rec.get("asset_decimals")
     if rec["side"] == "buy":
+        # honeypot / spoof guard: skip tokens that look unsellable
+        hp = lib.honeypot_reason(lib.token_price_info(mint, cfg["solana"]["dexscreener_chain_id"]))
+        if hp:
+            lib.append_jsonl(lib.data_dir(cfg) / "sleeve_fills.jsonl",
+                             {"tx_hash": rec["tx_hash"], "side": "buy", "mint": mint,
+                              "symbol": rec["asset_symbol"], "executed": False,
+                              "skip_reason": f"honeypot: {hp}", "quoted_at": round(time.time(), 3)})
+            return None
         quote = jupiter_quote(USDC_MINT, mint, rec["copy_usd"] * 1e6)
         out_amount = int(quote["outAmount"]) / 10 ** decimals if quote and decimals is not None else None
         fill_price = rec["copy_usd"] / out_amount if out_amount else None
