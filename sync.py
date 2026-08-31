@@ -12,6 +12,7 @@ prices before each clip. Idempotent: run again any time to correct drift.
     python sync.py --dry-run  # print the plan only
 """
 
+import json
 import os
 import sys
 import time
@@ -36,27 +37,76 @@ MIN_BOOK_LIQUIDITY = 25_000  # deepest-pair liquidity, USD
 MAX_POSITION_VS_LIQUIDITY = 1.0  # holding "worth" more than its pool is fake
 
 
+def _robinhood_token_candidates(cfg, blockscout_items):
+    """Union of every Robinhood token AJC might hold: Blockscout's list (flaky +
+    paginated, best-effort) PLUS every token we've onboarded or seen him trade.
+    The latter guarantees a real position (e.g. AI) is never missed just because
+    Blockscout dropped it from a page."""
+    cands = {}  # addr -> decimals(optional)
+    for item in blockscout_items:
+        t = item["token"]
+        a = (t.get("address") or t.get("address_hash") or "").lower()
+        if a:
+            cands[a] = int(t.get("decimals") or 18)
+    d = lib.data_dir(cfg)
+    # tokens the executor has onboarded (routes prove they're tradeable)
+    try:
+        st = json.loads((d / "executor_state_mainnet.json").read_text())
+        for a, tok in st.get("token_map", {}).items():
+            if isinstance(tok, dict):
+                cands.setdefault(a.lower(), tok.get("decimals", 18))
+    except (OSError, ValueError):
+        pass
+    # tokens seen in recent Robinhood trade detections
+    for tr in lib.read_jsonl(d / "trades.jsonl")[-600:]:
+        if tr.get("chain") == "robinhood" and tr.get("kind") == "swap":
+            a = tr["asset_token"]["address"].lower()
+            cands.setdefault(a, tr["asset_token"].get("decimals", 18))
+    return cands
+
+
+def _erc20_balance(rpc_url, token, holder, decimals):
+    try:
+        out = lib.rpc(rpc_url, "eth_call",
+                      [{"to": token, "data": "0x70a08231" + holder.lower().replace("0x", "").rjust(64, "0")},
+                       "latest"], retries=2)
+        return int(out, 16) / 10 ** decimals
+    except Exception:
+        return 0.0
+
+
 def fetch_trader_portfolio(cfg):
-    """-> (positions [{addr, symbol, usd, price}], cash_usd, total_usd, excluded)"""
+    """-> (positions [{addr, symbol, usd, price}], cash_usd, total_usd, excluded)
+
+    Robinhood holdings are read via on-chain balanceOf over a candidate set
+    (Blockscout list ∪ onboarded ∪ recently-traded), so a real position is
+    never dropped by Blockscout flakiness/pagination."""
     addr = cfg["trader"]["evm_address"]
+    rpc = cfg["chain"]["rpc"]
     s = requests.Session()
     s.headers["User-Agent"] = "Mozilla/5.0 (copy-vault-sync)"
-    r = s.get(f"https://robinhoodchain.blockscout.com/api/v2/addresses/{addr}/tokens?type=ERC-20",
-              timeout=30)
-    r.raise_for_status()
-    positions, cash, excluded = [], 0.0, []
-    for item in r.json().get("items", []):
-        t = item["token"]
-        taddr = (t.get("address") or t.get("address_hash") or "").lower()
+    items = []
+    for _ in range(3):
         try:
-            bal = int(item["value"]) / 10 ** int(t.get("decimals") or 18)
-        except (TypeError, ValueError):
+            r = s.get(f"https://robinhoodchain.blockscout.com/api/v2/addresses/{addr}/tokens?type=ERC-20",
+                      timeout=30)
+            if r.status_code == 200 and r.text.lstrip().startswith("{"):
+                items = r.json().get("items", [])
+                break
+        except requests.RequestException:
+            pass
+        time.sleep(2)
+
+    positions, cash, excluded = [], 0.0, []
+    for taddr, dec in _robinhood_token_candidates(cfg, items).items():
+        bal = _erc20_balance(rpc, taddr, addr, dec)
+        if bal <= 0:
             continue
         info = lib.token_price_info(taddr, cfg["chain"]["dexscreener_chain_id"])
         if not info["price"]:
             continue
         usd = bal * info["price"]
-        symbol = t.get("symbol") or taddr[:8]
+        symbol = info["symbol"] or taddr[:8]
         leg = {"symbol": symbol, "price_usd": info["price"], "liquidity_usd": info["liquidity"]}
         if is_funding_token(leg):
             cash += usd
