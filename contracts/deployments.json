@@ -5,10 +5,13 @@
     "explorer": "https://robinhoodchain.blockscout.com",
     "deployer_executor": "0x27813048104759935DD6D505e8cddda1a5f4EFA1",
     "deployed_at": "2026-08-29",
-    "vault": "0x12b508A1883b910a537c25883AE7DB518c1511D9",
+    "vault": "0xd6A56e553174dE93B3d29d0042270e3FeA99AC0c",
     "adapter": "0x33D8BA2F03dCf1c7a3d519DC07c5B754Cb72d72E",
     "asset_USDG": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
-    "route_adapter": "0x13c2aeD11ec90f6B8b5Ca8D7Ae1050C2e55195fD"
+    "route_adapter": "0x13c2aeD11ec90f6B8b5Ca8D7Ae1050C2e55195fD",
+    "vault_v1": "0x12b508A1883b910a537c25883AE7DB518c1511D9",
+    "migrated_at": "2026-08-31",
+    "notes": "v2 (multi-chain destinations) live; v1 0x12b5... liquidated to USDG + superseded"
   },
   "robinhood-testnet": {
     "chain_id": 46630,
