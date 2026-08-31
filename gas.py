@@ -89,6 +89,34 @@ def refill_sol(cfg, gcfg, usdc_avail):
     return 0.0
 
 
+def solana_dln_order(cfg, usd, dst_token, recipient):
+    """Create+sign+send a deBridge order from the sleeve: USDC on Solana ->
+    dst_token on Robinhood Chain, delivered to `recipient`. Returns sig."""
+    pub = sleeve._env()["SLEEVE_SOLANA_PUBKEY"]
+    r = requests.get("https://dln.debridge.finance/v1.0/dln/order/create-tx", params={
+        "srcChainId": 7565164, "srcChainTokenIn": sleeve.USDC_MINT,
+        "srcChainTokenInAmount": int(usd * 1e6),
+        "dstChainId": 4663, "dstChainTokenOut": dst_token,
+        "dstChainTokenOutRecipient": recipient,
+        "srcChainOrderAuthorityAddress": pub,
+        "dstChainOrderAuthorityAddress": keeper_addr(),
+        "prependOperatingExpenses": "false",
+    }, timeout=30, headers={"User-Agent": "copy-vault"})
+    body = r.json()
+    txdata = (body.get("tx") or {}).get("data")
+    if not txdata:
+        raise RuntimeError(f"no tx in deBridge response: {json.dumps(body)[:200]}")
+    raw = bytes.fromhex(txdata[2:]) if txdata.startswith("0x") else base64.b64decode(txdata)
+    from solders.keypair import Keypair
+    from solders.transaction import VersionedTransaction
+    kp = Keypair.from_base58_string(sleeve._env()["SLEEVE_SOLANA_SECRET"])
+    tx = VersionedTransaction.from_bytes(raw)
+    signed = VersionedTransaction(tx.message, [kp])
+    return lib.rpc(cfg["solana"]["rpc"], "sendTransaction",
+                   [base64.b64encode(bytes(signed)).decode(),
+                    {"encoding": "base64", "skipPreflight": False}])
+
+
 def refill_eth(cfg, gcfg, usdc_avail):
     eth = keeper_eth()
     if eth >= gcfg["evm_min_eth"]:
@@ -99,30 +127,8 @@ def refill_eth(cfg, gcfg, usdc_avail):
     if usd < 15 or not eth_price:
         print(f"  [gas] keeper ETH low ({eth:.5f}) but treasury can't cover refill")
         return 0.0
-    pub = sleeve._env()["SLEEVE_SOLANA_PUBKEY"]
     try:
-        r = requests.get("https://dln.debridge.finance/v1.0/dln/order/create-tx", params={
-            "srcChainId": 7565164, "srcChainTokenIn": sleeve.USDC_MINT,
-            "srcChainTokenInAmount": int(usd * 1e6),
-            "dstChainId": 4663, "dstChainTokenOut": NATIVE_ETH,
-            "dstChainTokenOutRecipient": keeper_addr(),
-            "srcChainOrderAuthorityAddress": pub,
-            "dstChainOrderAuthorityAddress": keeper_addr(),
-            "prependOperatingExpenses": "false",
-        }, timeout=30, headers={"User-Agent": "copy-vault"})
-        body = r.json()
-        txdata = (body.get("tx") or {}).get("data")
-        if not txdata:
-            raise RuntimeError(f"no tx in deBridge response: {json.dumps(body)[:200]}")
-        raw = bytes.fromhex(txdata[2:]) if txdata.startswith("0x") else base64.b64decode(txdata)
-        from solders.keypair import Keypair
-        from solders.transaction import VersionedTransaction
-        kp = Keypair.from_base58_string(sleeve._env()["SLEEVE_SOLANA_SECRET"])
-        tx = VersionedTransaction.from_bytes(raw)
-        signed = VersionedTransaction(tx.message, [kp])
-        sig = lib.rpc(cfg["solana"]["rpc"], "sendTransaction",
-                      [base64.b64encode(bytes(signed)).decode(),
-                       {"encoding": "base64", "skipPreflight": False}])
+        sig = solana_dln_order(cfg, usd, NATIVE_ETH, keeper_addr())
         print(f"  [gas] deBridge order sent: ${usd:,.2f} USDC -> ETH @ keeper ({sig[:16]}...) "
               f"— waiting for fill...")
         t0 = time.time()

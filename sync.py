@@ -249,6 +249,25 @@ def main():
                   f"{'buy' if p['delta'] > 0 else 'sell'} ${abs(p['delta']):,.2f} {p['symbol']}"
                   + (f" ({fill.get('skip_reason')})" if fill and not ok else ""))
 
+    # ---------------- capital repatriation: if planned Robinhood buys exceed
+    # vault cash and the sleeve holds USDC beyond its buffer, bridge it back
+    if ex.mainnet and sleeve_pub and cfg["sleeve"].get("auto_bridge"):
+        rh_buys = sum(p["delta"] for p in plan
+                      if p.get("chain") != "solana" and p["delta"] > 0)
+        vault_cash = uint(ex.call(ex.asset_addr(), "balanceOf(address)(uint256)",
+                                  ex.dep["vault"])) / 1e6
+        cash_short = rh_buys - (vault_cash - 1)
+        s_usdc, _ = sleeve_mod.token_balance(cfg, sleeve_pub, sleeve_mod.USDC_MINT)
+        buffer_target = nav * cfg["sleeve"].get("buffer_pct", 5) / 100
+        excess = s_usdc - buffer_target - 10  # keep the gas-treasury floor
+        amount = min(cash_short, excess)
+        if amount >= 20:
+            os.environ["SLEEVE_EXECUTE"] = "1"
+            try:
+                ex.bridge_back(amount)
+            except Exception as e:
+                print(f"  [sync] bridge-back failed ({str(e)[:120]}) — buys use vault cash only")
+
     # ---------------- Robinhood Chain legs (sells first: they fund the buys)
     clip_cap = nav * CLIP_FRACTION
     asset = ex.asset_addr()

@@ -575,6 +575,36 @@ class Executor:
         print(f"  [exec] bridging ${amount:,.2f} USDG -> sleeve via DLN: {tx}")
         return tx
 
+    def bridge_back(self, usd):
+        """Return excess sleeve USDC to the VAULT as USDG via deBridge, then
+        credit the on-chain cap counter with noteSleeveReturn. Funds go
+        straight to the vault contract — the keeper never holds them."""
+        import gas
+        before = uint(self.call(self.asset_addr(), "balanceOf(address)(uint256)",
+                                self.dep["vault"])) / 1e6
+        sig = gas.solana_dln_order(self.cfg, usd, USDG, self.dep["vault"])
+        print(f"  [exec] bridging back ${usd:,.2f} sleeve USDC -> vault USDG "
+              f"({str(sig)[:16]}...) — waiting for fill...")
+        t0 = time.time()
+        arrived = 0.0
+        while time.time() - t0 < 300:
+            time.sleep(10)
+            now = uint(self.call(self.asset_addr(), "balanceOf(address)(uint256)",
+                                 self.dep["vault"])) / 1e6
+            if now > before + usd * 0.5:
+                arrived = now - before
+                print(f"  [exec] vault received ${arrived:,.2f} USDG")
+                break
+        if arrived:
+            self.send(self.dep["vault"], "noteSleeveReturn(uint256)", int(arrived * 1e6))
+        else:
+            print("  [exec] bridge-back fill not seen in 5min — order remains open; "
+                  "run noteSleeveReturn manually once it lands")
+        lib.append_jsonl(self.exec_log, {"ts": round(time.time(), 3), "kind": "bridge_back",
+                                         "usd": round(usd, 2), "arrived": round(arrived, 2),
+                                         "sig": str(sig)})
+        return arrived
+
     def sleeve_configured(self):
         if getattr(self, "_sleeve_ok", None) is None:
             recv = self.call(self.dep["vault"], "sleeveReceiver()(bytes)").strip()
