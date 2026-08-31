@@ -134,7 +134,19 @@ class Executor:
                "--rpc-url", self.rpc, "--private-key", E["PRIVATE_KEY"], "--json"]
         if value:
             cmd += ["--value", value]
-        out = json.loads(run(cmd))
+        # The public RPC load-balances across replicas that can lag a few
+        # blocks; gas estimation against stale state produces phantom reverts
+        # (nothing was broadcast), so estimation failures get retried.
+        for attempt in range(3):
+            try:
+                out = json.loads(run(cmd))
+                break
+            except RuntimeError as e:
+                if "estimate gas" in str(e) and attempt < 2:
+                    print(f"  [send retry] estimation failed (lagged replica?), retrying...")
+                    time.sleep(4)
+                    continue
+                raise
         if out.get("status") not in ("0x1", 1, "1"):
             raise RuntimeError(f"tx reverted: {out.get('transactionHash')}")
         return out["transactionHash"]
