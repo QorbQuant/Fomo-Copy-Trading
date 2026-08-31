@@ -1,0 +1,17 @@
+[Unit]
+Description=fomo copy-vault: EVM watcher (Robinhood Chain signal detection)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=fomo
+WorkingDirectory=/home/fomo/fomo-copy-vault
+Environment=PATH=/home/fomo/.foundry/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 /home/fomo/fomo-copy-vault/watcher.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

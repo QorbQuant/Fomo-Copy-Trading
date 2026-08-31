@@ -1,0 +1,18 @@
+[Unit]
+Description=fomo copy-vault: mainnet executor (vault trades, NAV, gas, bridges)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=fomo
+WorkingDirectory=/home/fomo/fomo-copy-vault
+Environment=PATH=/home/fomo/.foundry/bin:/usr/local/bin:/usr/bin:/bin
+Environment=SLEEVE_EXECUTE=1
+ExecStart=/usr/bin/python3 /home/fomo/fomo-copy-vault/executor.py --mainnet
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

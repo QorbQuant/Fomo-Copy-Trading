@@ -1,0 +1,20 @@
+[Unit]
+Description=fomo copy-vault: Solana watcher + live sleeve execution
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=fomo
+WorkingDirectory=/home/fomo/fomo-copy-vault
+Environment=PATH=/home/fomo/.foundry/bin:/usr/local/bin:/usr/bin:/bin
+# SLEEVE_EXECUTE=1 arms REAL Jupiter execution of live Solana copy signals.
+# Remove this line to run the Solana side paper-only.
+Environment=SLEEVE_EXECUTE=1
+ExecStart=/usr/bin/python3 /home/fomo/fomo-copy-vault/solana_watcher.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
