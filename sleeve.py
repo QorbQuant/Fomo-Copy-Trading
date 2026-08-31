@@ -251,9 +251,16 @@ def _execute(cfg, quote):
                 raw = base64.b64decode(r.json()["swapTransaction"])
                 tx = VersionedTransaction.from_bytes(raw)
                 signed = VersionedTransaction(tx.message, [kp])
-                sig = lib.rpc(cfg["solana"]["rpc"], "sendTransaction",
-                              [base64.b64encode(bytes(signed)).decode(),
-                               {"encoding": "base64", "skipPreflight": False}])
+                my_sig = str(signed.signatures[0])
+                try:
+                    sig = lib.rpc(cfg["solana"]["rpc"], "sendTransaction",
+                                  [base64.b64encode(bytes(signed)).decode(),
+                                   {"encoding": "base64", "skipPreflight": False}],
+                                  retries=1)
+                except RuntimeError as e:
+                    if "AlreadyProcessed" not in str(e):
+                        raise
+                    sig = my_sig  # a prior attempt landed; confirm decides below
                 print(f"  [sleeve] sent {sig} — confirming...")
                 ok = confirm_sig(cfg, sig)
                 if ok:

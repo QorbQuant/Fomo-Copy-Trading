@@ -16,8 +16,8 @@
     "auto_refill": true,
     "evm_min_eth": 0.003,
     "evm_target_eth": 0.01,
-    "sol_min": 0.005,
-    "sol_target": 0.02,
+    "sol_min": 0.025,
+    "sol_target": 0.05,
     "max_refill_usd_per_day": 60
   },
   "sleeve": {

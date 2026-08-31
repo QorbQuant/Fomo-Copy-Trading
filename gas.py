@@ -89,10 +89,19 @@ def refill_sol(cfg, gcfg, usdc_avail):
     return 0.0
 
 
+DLN_ORDER_SOL_COST = 0.0175  # deBridge flat fee + order rent, in SOL
+
+
 def solana_dln_order(cfg, usd, dst_token, recipient):
     """Create+sign+send a deBridge order from the sleeve: USDC on Solana ->
     dst_token on Robinhood Chain, delivered to `recipient`. Returns sig."""
     pub = sleeve._env()["SLEEVE_SOLANA_PUBKEY"]
+    # deBridge orders carry a real SOL cost — top up first if short
+    if sleeve.sol_balance(cfg, pub) < DLN_ORDER_SOL_COST + 0.005:
+        usdc_now, _ = sleeve.token_balance(cfg, pub, sleeve.USDC_MINT)
+        refill_sol(cfg, cfg.get("gas", {}), usdc_now)
+        if sleeve.sol_balance(cfg, pub) < DLN_ORDER_SOL_COST + 0.003:
+            raise RuntimeError("sleeve SOL too low for a deBridge order and refill failed")
     r = requests.get("https://dln.debridge.finance/v1.0/dln/order/create-tx", params={
         "srcChainId": 7565164, "srcChainTokenIn": sleeve.USDC_MINT,
         "srcChainTokenInAmount": int(usd * 1e6),
@@ -124,13 +133,21 @@ def solana_dln_order(cfg, usd, dst_token, recipient):
             msg = MessageV0(msg.header, msg.account_keys, Hash.from_string(fresh),
                             msg.instructions, msg.address_table_lookups)
         signed = VersionedTransaction(msg, [kp])
+        my_sig = str(signed.signatures[0])
         try:
+            # retries=1: NEVER blind-retry a broadcast (idempotency hazard)
             return lib.rpc(cfg["solana"]["rpc"], "sendTransaction",
                            [base64.b64encode(bytes(signed)).decode(),
                             {"encoding": "base64", "skipPreflight": False,
-                             "preflightCommitment": "processed"}])
+                             "preflightCommitment": "processed"}], retries=1)
         except RuntimeError as e:
             last_err = e
+            if "AlreadyProcessed" in str(e):
+                # a prior attempt landed — succeed/fail on ITS real status
+                ok = sleeve.confirm_sig(cfg, my_sig, timeout=45)
+                if ok:
+                    return my_sig
+                raise RuntimeError(f"order tx landed but FAILED on-chain: {my_sig}")
             if "lockhash" in str(e) and attempt == 0:
                 time.sleep(2)
                 continue
