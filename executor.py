@@ -451,25 +451,30 @@ class Executor:
         return nav
 
     def post_nav(self, force=False):
-        # idle cadence stays under the 30-min navTtl but far above the old 10 min
-        # — most posts were pure gas burn (deposits only need NAV < navTtl old)
-        cadence = self.cfg.get("nav_post_seconds", 1500)
-        if not force and time.time() - self.state["last_nav_post"] < cadence:
+        # Only the on-chain postNav tx costs gas; NAV computation + the file the
+        # sleeve reads are free RPC reads. Two cadences: refresh the file often
+        # (sleeve stays fed) but post on-chain rarely (or when forced by a trade
+        # / deposit), which is where the gas savings come from.
+        now = time.time()
+        need_onchain = force or now - self.state["last_nav_post"] >= self.cfg.get("nav_post_seconds", 1500)
+        need_file = force or now - self.state.get("last_nav_file", 0) >= 120
+        if not need_onchain and not need_file:
             return
         nav = self.compute_nav_usd()
-        self.send(self.dep["vault"], "postNav(uint256)", int(nav * 1e6))
-        self.state["last_nav_post"] = time.time()
+        if need_file:
+            suffix = "_mainnet" if self.mainnet else "_testnet"
+            (lib.data_dir(self.cfg) / f"nav{suffix}.json").write_text(
+                json.dumps({"nav_usd": nav, "ts": now}))
+            self.state["last_nav_file"] = now
+        if need_onchain:
+            self.send(self.dep["vault"], "postNav(uint256)", int(nav * 1e6))
+            self.state["last_nav_post"] = now
+            print(f"  [exec] posted NAV ${nav:,.2f}")
+            try:
+                self.maybe_fund_sleeve(nav)
+            except Exception as e:
+                print(f"  [exec warn] sleeve bridge check failed: {e}")
         self.save()
-        # shared with sleeve.py for live sizing of Solana copies (env-suffixed:
-        # a testnet executor must never feed sizing to the live sleeve)
-        suffix = "_mainnet" if self.mainnet else "_testnet"
-        (lib.data_dir(self.cfg) / f"nav{suffix}.json").write_text(
-            json.dumps({"nav_usd": nav, "ts": time.time()}))
-        print(f"  [exec] posted NAV ${nav:,.2f}")
-        try:
-            self.maybe_fund_sleeve(nav)
-        except Exception as e:
-            print(f"  [exec warn] sleeve bridge check failed: {e}")
         if self.mainnet:
             try:
                 import gas
