@@ -39,13 +39,15 @@ _ALCHEMY = {
 def resolve_rpc(chain_name, default):
     """Dedicated RPC for a chain if configured, else the public default.
     Precedence: RPC_<CHAIN> full-URL override > ALCHEMY_KEY-built URL > default.
-    Keys live in .env (gitignored) so no endpoint/secret is committed."""
+    Only chains listed in ALCHEMY_CHAINS route through Alchemy (a network must
+    be enabled on the app first). Keys live in .env (gitignored)."""
     env = _read_env()
     explicit = env.get(f"RPC_{chain_name.upper()}")
     if explicit:
         return explicit
     key = env.get("ALCHEMY_KEY")
-    if key and chain_name in _ALCHEMY:
+    enabled = {c.strip() for c in env.get("ALCHEMY_CHAINS", "robinhood,base,solana").split(",")}
+    if key and chain_name in _ALCHEMY and chain_name in enabled:
         return f"https://{_ALCHEMY[chain_name]}.g.alchemy.com/v2/{key}"
     return default
 
