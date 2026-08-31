@@ -107,14 +107,35 @@ def solana_dln_order(cfg, usd, dst_token, recipient):
     if not txdata:
         raise RuntimeError(f"no tx in deBridge response: {json.dumps(body)[:200]}")
     raw = bytes.fromhex(txdata[2:]) if txdata.startswith("0x") else base64.b64decode(txdata)
+    from solders.hash import Hash
     from solders.keypair import Keypair
+    from solders.message import MessageV0
     from solders.transaction import VersionedTransaction
     kp = Keypair.from_base58_string(sleeve._env()["SLEEVE_SOLANA_SECRET"])
     tx = VersionedTransaction.from_bytes(raw)
-    signed = VersionedTransaction(tx.message, [kp])
-    return lib.rpc(cfg["solana"]["rpc"], "sendTransaction",
-                   [base64.b64encode(bytes(signed)).decode(),
-                    {"encoding": "base64", "skipPreflight": False}])
+    msg = tx.message
+    last_err = None
+    for attempt in range(2):
+        # deBridge's baked-in blockhash is stale/foreign by send time —
+        # re-stamp with a fresh one from OUR rpc before signing
+        fresh = lib.rpc(cfg["solana"]["rpc"], "getLatestBlockhash",
+                        [{"commitment": "finalized"}])["value"]["blockhash"]
+        if isinstance(msg, MessageV0):
+            msg = MessageV0(msg.header, msg.account_keys, Hash.from_string(fresh),
+                            msg.instructions, msg.address_table_lookups)
+        signed = VersionedTransaction(msg, [kp])
+        try:
+            return lib.rpc(cfg["solana"]["rpc"], "sendTransaction",
+                           [base64.b64encode(bytes(signed)).decode(),
+                            {"encoding": "base64", "skipPreflight": False,
+                             "preflightCommitment": "processed"}])
+        except RuntimeError as e:
+            last_err = e
+            if "lockhash" in str(e) and attempt == 0:
+                time.sleep(2)
+                continue
+            raise
+    raise last_err
 
 
 def refill_eth(cfg, gcfg, usdc_avail):
