@@ -141,8 +141,17 @@ class Executor:
 
     # ------------------------------------------------------------ tokens
 
+    def mark_broken(self, real_addr, hours=6):
+        tok = self.state["token_map"].get(real_addr)
+        if tok:
+            tok["broken_until"] = time.time() + hours * 3600
+            self.save()
+
     def ensure_token(self, real_addr, symbol, price):
         tok = self.state["token_map"].get(real_addr)
+        if tok is not None and tok.get("broken_until", 0) > time.time():
+            raise RuntimeError(f"{symbol} route marked broken (execution-level token "
+                               f"failure), retrying after cooldown")
         if self.mainnet and tok is not None and "legs_buy" not in tok:
             tok = None  # stale pre-RouteAdapter entry: rediscover and re-set routes
         if tok is None:
@@ -598,8 +607,12 @@ class Executor:
                 min_out = self.min_out(tok, "buy", amount_in)
             else:
                 min_out = int(usd / price * 10 ** tok["decimals"] * (1 - SLIPPAGE))
-            tx = self.send(self.dep["vault"], "mirrorTrade(address,address,uint256,uint256)",
-                           asset, tok["addr"], amount_in, min_out)
+            try:
+                tx = self.send(self.dep["vault"], "mirrorTrade(address,address,uint256,uint256)",
+                               asset, tok["addr"], amount_in, min_out)
+            except RuntimeError:
+                self.mark_broken(rec["asset_address"])
+                raise
         else:
             bal = uint(self.call(tok["addr"], "balanceOf(address)(uint256)", self.dep["vault"]))
             if self.mainnet and rec.get("trader_amount"):

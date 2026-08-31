@@ -281,8 +281,14 @@ def main():
                     min_out = ex.min_out(tok, "buy", amount_in)
                 else:
                     min_out = int(clip / p["price"] * 10 ** dec * 0.97)
-                tx = ex.send(ex.dep["vault"], "mirrorTrade(address,address,uint256,uint256)",
-                             asset, tok["addr"], amount_in, min_out)
+                try:
+                    tx = ex.send(ex.dep["vault"], "mirrorTrade(address,address,uint256,uint256)",
+                                 asset, tok["addr"], amount_in, min_out)
+                except RuntimeError as e:
+                    print(f"  [sync] {p['symbol']} trade reverted — route marked broken, "
+                          f"skipping position ({str(e)[-120:]})")
+                    ex.mark_broken(p["addr"])
+                    break
             else:
                 bal = uint(ex.call(tok["addr"], "balanceOf(address)(uint256)", ex.dep["vault"]))
                 amount_in = min(int(clip / p["price"] * 10 ** dec), bal)
@@ -292,8 +298,14 @@ def main():
                     min_out = ex.min_out(tok, "sell", amount_in)
                 else:
                     min_out = int(clip * 1e6 * 0.97)
-                tx = ex.send(ex.dep["vault"], "mirrorTrade(address,address,uint256,uint256)",
-                             tok["addr"], asset, amount_in, min_out)
+                try:
+                    tx = ex.send(ex.dep["vault"], "mirrorTrade(address,address,uint256,uint256)",
+                                 tok["addr"], asset, amount_in, min_out)
+                except RuntimeError as e:
+                    print(f"  [sync] {p['symbol']} trade reverted — route marked broken, "
+                          f"skipping position ({str(e)[-120:]})")
+                    ex.mark_broken(p["addr"])
+                    break
             remaining -= clip
             lib.append_jsonl(lib.data_dir(cfg) / "executions.jsonl",
                              {"ts": round(time.time(), 3), "kind": "sync", "side": side,
