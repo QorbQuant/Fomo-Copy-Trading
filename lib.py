@@ -148,9 +148,13 @@ def satellite_pending(cfg):
         return {}
 
 
-def mark_satellite_pending(cfg, chain, usd, usdc_before):
+def mark_satellite_pending(cfg, chain, usd, value_before):
+    # value_before = the keeper's TOTAL satellite value (USDC + tokens) at send.
+    # Landing is detected by total value RISING ~usd, which is invariant under the
+    # keeper swapping the delivered USDC into a token (that would fool a raw USDC
+    # balance check).
     d = satellite_pending(cfg)
-    d[chain] = {"usd": usd, "usdc_before": usdc_before, "ts": round(time.time(), 3)}
+    d[chain] = {"usd": usd, "value_before": value_before, "ts": round(time.time(), 3)}
     _sat_pending_file(cfg).write_text(json.dumps(d))
 
 

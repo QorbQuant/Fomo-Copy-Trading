@@ -477,29 +477,36 @@ class Executor:
 
     def satellite_pending_usd(self):
         """USDC bridged to satellites (fundDestination) that has left the vault
-        but not yet landed at the keeper — in-flight value, counted in NAV so the
-        fund bridge stays NAV-neutral. Clears an entry the moment the delivery
-        lands (keeper_holdings then counts it, so no double-count) or after a 1h
-        timeout (assume the order failed; stop counting phantom NAV)."""
+        but is not yet reflected in the keeper's holdings — in-flight value,
+        counted in NAV so the fund bridge stays NAV-neutral.
+
+        Landing is detected by the keeper's TOTAL value (USDC + tokens) rising by
+        ~the bridged amount, NOT by the USDC balance — because the whole reason
+        for the fund is a deferred buy, so the delivered USDC is immediately
+        swapped into a token. Tracking total value keeps that swap (and any
+        token<->USDC sell) from mis-signaling landing. We count only the
+        un-landed remainder, so keeper_holdings and this never double-count."""
+        import satellite as sat_mod
         total = 0.0
         for chain, p in list(lib.satellite_pending(self.cfg).items()):
-            sat = self.cfg.get("satellites", {}).get(chain)
-            if not sat:
+            if chain not in self.cfg.get("satellites", {}):
                 lib.clear_satellite_pending(self.cfg, chain)
                 continue
-            udec = sat.get("usdc_decimals", 6)
             try:
-                bal = uint(self.call(sat["usdc"], "balanceOf(address)(uint256)", E["DEPLOYER"])) / 10 ** udec
-            except RuntimeError:
-                total += p["usd"]  # can't check right now — assume still in flight
+                now_val = sat_mod.Satellite(chain).keeper_holdings_usd()
+            except Exception:
+                total += p["usd"]  # can't value it now — assume still in flight
                 continue
-            if bal >= p["usdc_before"] + p["usd"] * 0.9:
-                lib.clear_satellite_pending(self.cfg, chain)  # landed; holdings counts it now
-            elif time.time() - p["ts"] > 3600:
-                print(f"  [exec warn] {chain} fund bridge not landed in 1h — dropping from NAV")
+            landed = max(0.0, now_val - p.get("value_before", 0))
+            if landed >= p["usd"] * 0.9:
+                # reflected in holdings (the ~3% gap is the bridge fee) — done
+                lib.clear_satellite_pending(self.cfg, chain)
+            elif time.time() - p["ts"] > 86400:
+                # 24h: like the sleeve's bridge_pending, assume resolved/cancelled
+                print(f"  [exec warn] {chain} fund bridge unresolved 24h — dropping from NAV")
                 lib.clear_satellite_pending(self.cfg, chain)
             else:
-                total += p["usd"]
+                total += p["usd"] - landed  # count only what hasn't landed yet
         return total
 
     def post_nav(self, force=False):
@@ -795,7 +802,14 @@ class Executor:
                 lib.mark_satellite_active(self.cfg, req["chain"])
                 # track the bridged USDC as in-flight (left the vault, not yet at
                 # the satellite) so the ~15-90s bridge window stays NAV-neutral.
-                lib.mark_satellite_pending(self.cfg, req["chain"], amount, have)
+                # Baseline is TOTAL keeper value (USDC + tokens), so landing is
+                # seen even if the keeper immediately swaps the USDC into a token.
+                try:
+                    import satellite as sat_mod
+                    value_before = sat_mod.Satellite(req["chain"]).keeper_holdings_usd()
+                except Exception:
+                    value_before = have  # fallback: USDC only
+                lib.mark_satellite_pending(self.cfg, req["chain"], amount, value_before)
                 try:
                     import gas
                     gas.ensure_satellite_gas(self.cfg, req["chain"], sat)
