@@ -99,6 +99,10 @@ class Executor:
         self.cfg = lib.load_config()
         self.mainnet = mainnet
         self.dep = DEPLOYMENTS["robinhood-mainnet" if mainnet else "robinhood-testnet"]
+        # vault_version gates v3-only wiring (2-arg postNav with away split,
+        # sweepGas). Absent -> 2 (the live multi-destination vault). Flip to 3 in
+        # deployments.json the moment a v3 vault is deployed and this all lights up.
+        self.vault_version = self.dep.get("vault_version", 2)
         self.rpc = lib.resolve_rpc("robinhood" if mainnet else "robinhood-testnet", self.dep["rpc"])
         suffix = "_mainnet" if mainnet else ""
         self.exec_log = lib.data_dir(self.cfg) / f"executions{suffix}.jsonl"
@@ -414,8 +418,15 @@ class Executor:
     def asset_addr(self):
         return USDG if self.mainnet else self.dep["mUSDC"]
 
-    def compute_nav_usd(self):
-        nav = uint(self.call(self.asset_addr(), "balanceOf(address)(uint256)", self.dep["vault"])) / 1e6
+    def compute_nav_split(self):
+        """(total_usd, away_usd). `away` is the slice of NAV that does NOT live in
+        the vault contract on the home chain — the Solana sleeve wallet, in-flight
+        DLN escrow, and any live satellite. v3's postNav takes both so in-kind
+        redemption can pay the full home slice and leave the away slice as shares
+        the redeemer keeps until that capital is bridged home (the haircut fix).
+        `home` is the vault's own USDG plus its home-chain token positions."""
+        home = uint(self.call(self.asset_addr(), "balanceOf(address)(uint256)", self.dep["vault"])) / 1e6
+        away = 0.0
         if self.mainnet:
             # value the sleeve wallet directly (cash + positions + SOL);
             # the on-chain sleeveFundedAsset counter is only the cap tracker
@@ -423,10 +434,10 @@ class Executor:
             pub = sleeve_mod._env().get("SLEEVE_SOLANA_PUBKEY")
             if pub:
                 try:
-                    nav += sleeve_mod.sleeve_value_usd(self.cfg, pub)
+                    away += sleeve_mod.sleeve_value_usd(self.cfg, pub)
                 except Exception as e:
                     print(f"  [exec warn] sleeve valuation failed, NAV excludes sleeve: {e}")
-            nav += self.bridge_pending_usd()  # in-flight DLN escrow is still vault value
+            away += self.bridge_pending_usd()  # in-flight DLN escrow is still vault value
             # satellite chains marked live: keeper's USDC + positions there are
             # vault capital deployed cross-chain. Gated on "live" so an unfunded
             # or dry-run satellite never touches the NAV path.
@@ -435,11 +446,11 @@ class Executor:
                     continue
                 try:
                     import satellite as sat_mod
-                    nav += sat_mod.Satellite(sname).keeper_holdings_usd()
+                    away += sat_mod.Satellite(sname).keeper_holdings_usd()
                 except Exception as e:
                     print(f"  [exec warn] satellite {sname} valuation failed, NAV excludes it: {e}")
         else:
-            nav += uint(self.call(self.dep["vault"], "sleeveFundedAsset()(uint256)")) / 1e6
+            away += uint(self.call(self.dep["vault"], "sleeveFundedAsset()(uint256)")) / 1e6
         for real_addr, tok in self.state["token_map"].items():
             bal = uint(self.call(tok["addr"], "balanceOf(address)(uint256)",
                                  self.dep["vault"])) / 10 ** tok["decimals"]
@@ -447,8 +458,11 @@ class Executor:
                 continue
             price = lib.price_usd(real_addr, self.cfg["chain"]["dexscreener_chain_id"])
             if price:
-                nav += bal * price
-        return nav
+                home += bal * price
+        return home + away, away
+
+    def compute_nav_usd(self):
+        return self.compute_nav_split()[0]
 
     def post_nav(self, force=False):
         # Only the on-chain postNav tx costs gas; NAV computation + the file the
@@ -460,22 +474,33 @@ class Executor:
         need_file = force or now - self.state.get("last_nav_file", 0) >= 120
         if not need_onchain and not need_file:
             return
-        nav = self.compute_nav_usd()
+        nav, away = self.compute_nav_split()
         if need_file:
             suffix = "_mainnet" if self.mainnet else "_testnet"
             (lib.data_dir(self.cfg) / f"nav{suffix}.json").write_text(
-                json.dumps({"nav_usd": nav, "ts": now}))
+                json.dumps({"nav_usd": nav, "away_usd": away, "ts": now}))
             self.state["last_nav_file"] = now
         if need_onchain:
-            self.send(self.dep["vault"], "postNav(uint256)", int(nav * 1e6))
+            if self.vault_version >= 3:
+                away_raw = min(int(away * 1e6), int(nav * 1e6))  # contract needs away <= total
+                self.send(self.dep["vault"], "postNav(uint256,uint256)", int(nav * 1e6), away_raw)
+            else:
+                self.send(self.dep["vault"], "postNav(uint256)", int(nav * 1e6))
             self.state["last_nav_post"] = now
-            print(f"  [exec] posted NAV ${nav:,.2f}")
+            print(f"  [exec] posted NAV ${nav:,.2f}" + (f" (away ${away:,.2f})" if self.vault_version >= 3 else ""))
             try:
                 self.maybe_fund_sleeve(nav)
             except Exception as e:
                 print(f"  [exec warn] sleeve bridge check failed: {e}")
         self.save()
         if self.mainnet:
+            # cheap home-chain refill FIRST: if it tops the keeper above evm_min,
+            # gas.maintain's deBridge path sees a full tank and skips the ~10x
+            # costlier Solana round-trip. No-op on v2 / when the tank is full.
+            try:
+                self.sweep_gas_if_low()
+            except Exception as e:
+                print(f"  [exec warn] sweepGas check failed: {e}")
             try:
                 import gas
                 gas.maintain(self.cfg)
@@ -486,6 +511,52 @@ class Executor:
             except Exception as e:
                 print(f"  [exec warn] satellite funding check failed: {e}")
         return nav
+
+    def sweep_gas_if_low(self):
+        """v3 only: refuel the keeper's home-chain ETH from the vault's loose
+        USDG via the on-chain sweepGas path (USDG -> WETH -> unwrap -> ETH to the
+        pinned keeper). Preventive — fires while the tank is low but not empty,
+        so it never reaches zero. The contract bounds it (maxGasSweepBps +
+        cooldown); here we also bound to the vault's loose USDG and the daily
+        NAV->gas cap, and fall back silently to the deBridge path on any miss."""
+        if self.vault_version < 3 or not self.mainnet:
+            return
+        gcfg = self.cfg.get("gas", {})
+        if not gcfg.get("auto_refill"):
+            return
+        import gas as gas_mod
+        if gas_mod._spent_today(self.cfg) >= gcfg.get("max_refill_usd_per_day", 80):
+            return
+        eth = int(lib.rpc(self.rpc, "eth_getBalance", [E["DEPLOYER"], "latest"]), 16) / 1e18
+        if eth >= gcfg.get("evm_min_eth", 0.006):
+            return
+        eth_price = lib.price_usd(WETH.lower(), "robinhood") or 0
+        if not eth_price:
+            return
+        usd_needed = (gcfg.get("evm_target_eth", 0.012) - eth) * eth_price
+        vault_usdg = uint(self.call(self.asset_addr(), "balanceOf(address)(uint256)",
+                                    self.dep["vault"])) / 1e6
+        usd = min(usd_needed, max(vault_usdg - 1, 0))
+        if usd < 0.5:  # too little loose USDG to matter; let deBridge/human cover it
+            return
+        usdg_raw = int(usd * 1e6)
+        try:
+            fee = self._usdg_weth_fee()
+            expected_weth = self.quote_out(encode_path(USDG, fee, WETH), usdg_raw)
+        except Exception as e:
+            print(f"  [gas] sweepGas quote failed, deBridge path will cover it: {str(e)[:120]}")
+            return
+        if expected_weth == 0:
+            return
+        min_eth_out = int(expected_weth * (1 - SLIPPAGE))
+        try:
+            self.send(self.dep["vault"], "sweepGas(uint256,uint256)", usdg_raw, min_eth_out)
+            gas_mod._log(self.cfg, {"kind": "sweep_gas", "usd": round(usd, 2),
+                                    "eth_out": round(expected_weth / 1e18, 6)})
+            print(f"  [gas] sweepGas: ${usd:,.2f} USDG -> ~{expected_weth / 1e18:.5f} ETH @ keeper")
+        except RuntimeError as e:
+            # cooldown / disabled / slippage aren't fatal — deBridge is the fallback
+            print(f"  [gas] sweepGas skipped: {str(e)[:140]}")
 
     # ------------------------------------------------------------ bridging
     # A pending-order ledger (data/bridge_pending.json, re-read every use so

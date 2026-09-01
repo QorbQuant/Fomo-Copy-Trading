@@ -45,7 +45,9 @@ const VAULT = "0xd6A56e553174dE93B3d29d0042270e3FeA99AC0c";
 const USDG  = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168";
 const CHAIN = "0x1237"; // 4663
 const RPC   = "https://rpc.mainnet.chain.robinhood.com";
+const SLIPPAGE_BPS = 100n; // depositor accepts at most 1% fewer shares than quoted
 let acct = null;
+let isV3 = false; // detected at connect: v3 vaults take deposit(assets, minSharesOut)
 
 const $ = id => document.getElementById(id);
 const pad = (hex) => hex.replace(/^0x/, "").toLowerCase().padStart(64, "0");
@@ -55,6 +57,35 @@ const fmt = (raw, dec, dp) => (Number(BigInt(raw)) / 10 ** dec).toLocaleString(u
 
 async function rpcCall(to, data) {
   return await ethereum.request({method: "eth_call", params: [{to, data}, "latest"]});
+}
+
+// Probe a v3-only view (pricePerShare); v2 has no such function and reverts.
+// A v3 vault takes deposit(assets, minSharesOut) — a slippage floor so a NAV
+// post can't front-run the depositor into fewer shares than they accepted.
+async function detectVersion() {
+  try {
+    const r = await rpcCall(VAULT, "0x99530b06"); // pricePerShare()
+    isV3 = typeof r === "string" && r.length >= 66;
+  } catch (e) { isV3 = false; }
+}
+
+// Shares a deposit of `amt` (USDG raw, 6dp) mints at the current mark, and the
+// minimum the depositor will accept. Mirrors the contract exactly: it mints on
+// NET assets (assets minus the on-chain deposit fee), so we must net the fee out
+// before quoting or minSharesOut sits above what the contract actually mints and
+// the deposit reverts. First deposit is a 1:1e12 bootstrap with no front-run
+// surface (min 0).
+async function quoteShares(amt) {
+  let feeBps = 0n;
+  try { feeBps = BigInt(await rpcCall(VAULT, "0xab879827")); } catch (e) {} // depositFeeBps()
+  const net = amt - amt * feeBps / 10000n;
+  const supply = BigInt(await rpcCall(VAULT, "0x18160ddd"));      // totalSupply()
+  if (supply === 0n) return { expected: net * (10n ** 12n), min: 0n };
+  const nav = BigInt(await rpcCall(VAULT, "0x3aa32863"));         // totalNavAsset()
+  if (nav === 0n) return { expected: net * (10n ** 12n), min: 0n };
+  const expected = net * supply / nav;
+  const min = expected * (10000n - SLIPPAGE_BPS) / 10000n;
+  return { expected, min };
 }
 
 async function refresh() {
@@ -112,6 +143,7 @@ $("connect").onclick = async () => {
   const accts = await ethereum.request({method: "eth_requestAccounts"});
   acct = accts[0];
   await ensureChain();
+  await detectVersion();
   $("acct").textContent = acct.slice(0, 6) + "…" + acct.slice(-4);
   status("");
   await refresh();
@@ -124,7 +156,16 @@ $("approve").onclick = async () => {
 
 $("deposit").onclick = async () => {
   const amt = amountRaw(); if (amt === null) return;
-  await send(VAULT, "0xb6b55f25" + padN(amt), "Deposit");
+  if (isV3) {
+    const { expected, min } = await quoteShares(amt);
+    status(`Depositing — you'll receive ≈ ${fmt(expected.toString(), 18, 4)} avgJOE `
+           + `(min ${fmt(min.toString(), 18, 4)}); confirm in MetaMask…`);
+    // deposit(uint256 assets, uint256 minSharesOut)
+    await send(VAULT, "0xe2bbb158" + padN(amt) + padN(min), "Deposit");
+  } else {
+    // v2: deposit(uint256 assets)
+    await send(VAULT, "0xb6b55f25" + padN(amt), "Deposit");
+  }
 };
 </script>
 </body>
