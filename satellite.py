@@ -95,7 +95,7 @@ class Satellite:
     def _usdc_weth_fee(self):
         if "uw_fee" not in self.state:
             eth = lib.price_usd(self.weth.lower(), self.slug) or 0
-            best = self._deepest_fee(self.weth, self.usdc, 1.0, 6) or (0, 500)
+            best = self._deepest_fee(self.weth, self.usdc, 1.0, self.usdc_dec) or (0, 500)
             self.state["uw_fee"] = best[1]
             self.save()
         return self.state["uw_fee"]
@@ -104,7 +104,7 @@ class Satellite:
         """Best USDC<->token V3 path -> (path_buy, path_sell, desc, depth) or raise."""
         eth = lib.price_usd(self.weth.lower(), self.slug) or 0
         cands = []
-        d = self._deepest_fee(token, self.usdc, 1.0, 6)
+        d = self._deepest_fee(token, self.usdc, 1.0, self.usdc_dec)
         if d and d[0] >= 1000:
             cands.append((d[0], encode_path(self.usdc, d[1], token),
                           encode_path(token, d[1], self.usdc), f"USDC direct fee {d[1]}"))

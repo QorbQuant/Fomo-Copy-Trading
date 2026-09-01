@@ -185,6 +185,15 @@ def refill_eth(cfg, gcfg, usdc_avail):
         return 0.0
 
 
+def _last_satellite_gas_ts(cfg, chain):
+    """Timestamp of the most recent native-gas order to `chain` (0 if none)."""
+    ts = 0.0
+    for e in lib.read_jsonl(lib.data_dir(cfg) / "gas_refills.jsonl"):
+        if e.get("kind") == "satellite_gas" and e.get("chain") == chain:
+            ts = max(ts, e.get("ts", 0))
+    return ts
+
+
 def refill_satellite_gas(cfg):
     """Keep the keeper's NATIVE gas topped up on every LIVE satellite chain, so a
     cross-chain trade never gets missed waiting for gas. Sourced from the sleeve
@@ -209,11 +218,17 @@ def refill_satellite_gas(cfg):
         target = sat.get("gas_target_usd", 2.0)
         if bal * native_px >= target * 0.5:  # still over half a tank
             continue
+        # in-flight guard: a deBridge gas order takes ~1-3 min to fill; don't
+        # re-fire every maintain cycle (~120s) while one is still landing, or we
+        # burn duplicate fees and can exhaust the daily cap (starving home gas).
+        if time.time() - _last_satellite_gas_ts(cfg, name) < 900:
+            continue
         spent = _spent_today(cfg)
         cap = gcfg.get("max_refill_usd_per_day", 60)
-        if spent >= cap:
+        remaining = cap - spent
+        if remaining < 3:  # can't afford the deBridge order floor without breaching the cap
             return
-        usd = max(min(target - bal * native_px, cap - spent), 3)  # small; deBridge order floor
+        usd = max(min(target - bal * native_px, remaining), 3)  # small; deBridge order floor
         pub = sleeve._env()["SLEEVE_SOLANA_PUBKEY"]
         usdc, _ = sleeve.token_balance(cfg, pub, sleeve.USDC_MINT)
         if usdc - MIN_SLEEVE_USDC_FLOOR < usd:
