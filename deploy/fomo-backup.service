@@ -1,0 +1,9 @@
+[Unit]
+Description=fomo copy-vault: off-box state backup (data snapshot -> webhook + local rotate)
+
+[Service]
+Type=oneshot
+User=fomo
+WorkingDirectory=/home/fomo/fomo-copy-vault
+Environment=PATH=/usr/bin:/bin
+ExecStart=/usr/bin/python3 /home/fomo/fomo-copy-vault/backup.py

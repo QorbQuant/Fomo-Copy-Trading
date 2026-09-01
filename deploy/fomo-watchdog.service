@@ -1,0 +1,8 @@
+[Unit]
+Description=fomo copy-vault: restart the executor if it hangs (NAV file stale while active)
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/fomo/fomo-copy-vault
+# Runs as ROOT (no User=) so it can systemctl restart the executor.
+ExecStart=/usr/bin/python3 /home/fomo/fomo-copy-vault/watchdog.py
