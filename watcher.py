@@ -76,6 +76,7 @@ def normalize_tx(cfg, tx_hash, logs, detected_at, backfill):
     block_time = lib.block_timestamp(rpc_url, logs[0]["blockNumber"])
     base = {
         "chain": cfg["chain"]["name"], "dex_chain": chain_slug,
+        "trader": cfg.get("_trader_key", cfg["trader"].get("handle", "primary")),
         "tx_hash": tx_hash, "block": block, "block_time": block_time,
         "detected_at": round(detected_at, 3), "backfill": backfill,
         "latency_s": None if backfill else round(detected_at - block_time, 3),
@@ -136,10 +137,11 @@ def process_range(cfg, from_block, to_block, backfill=False):
             trade = normalize_tx(cfg, tx_hash, by_tx[tx_hash], detected_at, backfill)
             if trade is None:
                 continue
-            lib.append_jsonl(d / "trades.jsonl", trade)
+            out = cfg.get("_out_suffix", "")
+            lib.append_jsonl(d / f"trades{out}.jsonl", trade)
             if trade["kind"] == "swap":
                 n_trades += 1
-                rec = copier.plan_copy(cfg, trade, d / "copy_trades.jsonl")
+                rec = copier.plan_copy(cfg, trade, d / f"copy_trades{out}.jsonl")
                 _print_trade(trade, rec)
             else:
                 print(f"  [{trade['kind']}] {trade['side']} {trade['asset_token']['symbol']} "
@@ -172,14 +174,35 @@ def select_chain(cfg):
     return ""
 
 
+def select_trader(cfg):
+    """`--trader <key>` swaps cfg['trader'] for an entry in cfg['traders'] so one
+    watcher observes one profile. NON-PRIMARY traders write to their OWN output
+    files (trades_<key>.jsonl / copy_trades_<key>.jsonl) that the executor never
+    reads — observation only, so there is zero risk of mirroring their trades.
+    Sets cfg['_out_suffix'] (for the output files) and cfg['_trader_key'] (record
+    tag), and returns the same suffix for the per-process state file. The default
+    (no flag) is the primary trader with unsuffixed files — unchanged behavior."""
+    if "--trader" in sys.argv:
+        key = sys.argv[sys.argv.index("--trader") + 1]
+        cfg["trader"] = cfg["traders"][key]
+        suffix = f"_{key}"
+    else:
+        key = cfg["trader"].get("handle", "primary")
+        suffix = ""
+    cfg["_trader_key"] = key
+    cfg["_out_suffix"] = suffix
+    return suffix
+
+
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
     cfg = lib.load_config()
-    suffix = select_chain(cfg)
+    chain_suffix = select_chain(cfg)
+    trader_suffix = select_trader(cfg)
     rpc_url = cfg["chain"]["rpc"]
     d = lib.data_dir(cfg)
-    state_file = d / f"state{suffix}.json"
+    state_file = d / f"state{chain_suffix}{trader_suffix}.json"
 
     def save(block):
         state_file.write_text(json.dumps({"last_block": block}))
@@ -195,8 +218,9 @@ def main():
             print("Backfill done. Following live.")
         last = latest
         save(last)
-    print(f"Watching {cfg['trader']['evm_address']} on {cfg['chain']['name']} "
-          f"(chain {cfg['chain']['chain_id']}) from block {last}...")
+    print(f"Watching @{cfg['_trader_key']} {cfg['trader']['evm_address']} on "
+          f"{cfg['chain']['name']} (chain {cfg['chain']['chain_id']}) from block {last} "
+          f"-> copy_trades{cfg['_out_suffix']}.jsonl...")
     while True:
         time.sleep(cfg["watcher"]["poll_seconds"])
         try:

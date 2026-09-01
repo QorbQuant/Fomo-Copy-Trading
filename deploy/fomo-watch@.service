@@ -1,0 +1,20 @@
+[Unit]
+Description=fomo copy-vault: observe one profile on one chain (paper only). Instance = <trader>.<chain>
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=fomo
+WorkingDirectory=/home/fomo/fomo-copy-vault
+Environment=PATH=/home/fomo/.foundry/bin:/usr/local/bin:/usr/bin:/bin
+# Instance name is "<trader>.<chain>", e.g. fomo-watch@frankdegods.robinhood.
+# Observation only: writes to trades_<trader>.jsonl / copy_trades_<trader>.jsonl,
+# which the executor never reads. --no-backfill starts from head.
+ExecStart=/bin/sh -c 'python3 watcher.py --trader "$(echo %i | cut -d. -f1)" --chain "$(echo %i | cut -d. -f2)" --no-backfill'
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

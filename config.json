@@ -46,6 +46,16 @@
     "solana_address": "H2QSGECp13sFLJgdTsDtayX3dk18Dm6sQMSQKcew7Xzk",
     "ref_capital_usd": 1800000
   },
+  "_comment_traders": "OBSERVATION-ONLY additional profiles (paper, for testing data). watcher.py --trader <key> selects one of these; their trades go to trades_<key>.jsonl / copy_trades_<key>.jsonl, which the executor NEVER reads (and it also guards by the record's trader tag). NOT for execution — the live vault only ever mirrors the primary 'trader' above. Fill evm_address/solana_address once resolved + corroborated on-chain.",
+  "traders": {
+    "frankdegods": {
+      "handle": "frankdegods",
+      "evm_address": "0x696d1265c8fc4f14797abebfae3c43ebfa9d8e28",
+      "solana_address": "498g1rVnFcnjBjpfw1xyqA1WvgQXUU8RWuELjxkjAayQ",
+      "ref_capital_usd": 1000000,
+      "_resolved": "fomowalletfinder 2026-09-01, both VERIFIED; EVM corroborated on-chain: EIP-7702 delegated to 0xe6cae83b... (same fomo delegate impl as AJC) on robinhood + base"
+    }
+  },
   "_comment_satellites": "Per-chain Uniswap DEX config for satellite execution (keeper swaps its own USDC directly, no vault contract). Addresses verified on-chain. Add bnb/ethereum/monad/arc here as each is brought online.",
   "satellites": {
     "base": {

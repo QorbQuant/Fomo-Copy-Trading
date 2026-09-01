@@ -909,10 +909,15 @@ class Executor:
                         lines = f.readlines()
                         self.state["offset"] = f.tell()
                     self.save()
+                    primary = self.cfg["trader"].get("handle", "primary")
                     for line in lines:
                         rec = json.loads(line)
+                        # defense-in-depth: only ever act on the configured trader.
+                        # Observation-only profiles write to their own copy_trades
+                        # files, but this guards any accidental cross-contamination.
                         if (rec.get("action") == "copy" and not rec.get("backfill")
-                                and rec.get("chain", "robinhood") == "robinhood"):
+                                and rec.get("chain", "robinhood") == "robinhood"
+                                and rec.get("trader", primary) == primary):
                             if time.time() - rec.get("detected_at", 0) > MAX_SIGNAL_AGE_S:
                                 print(f"  [exec] stale signal skipped: {rec['asset_symbol']}")
                                 continue
