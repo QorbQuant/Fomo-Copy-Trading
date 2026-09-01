@@ -131,6 +131,36 @@ def unmark_satellite_active(cfg, chain):
         _active_sat_file(cfg).write_text(json.dumps(d))
 
 
+# --- satellite fund bridges in flight: USDC that has LEFT the vault (fundDestination)
+# but not yet LANDED at the satellite (~15-90s). Counted in NAV so the fund
+# bridge is NAV-neutral (mirrors the Solana sleeve's bridge_pending.json). One
+# entry per chain; cleared when the delivery lands or after a timeout.
+
+def _sat_pending_file(cfg):
+    return data_dir(cfg) / "satellite_pending.json"
+
+
+def satellite_pending(cfg):
+    p = _sat_pending_file(cfg)
+    try:
+        return json.loads(p.read_text()) if p.exists() else {}
+    except (ValueError, OSError):
+        return {}
+
+
+def mark_satellite_pending(cfg, chain, usd, usdc_before):
+    d = satellite_pending(cfg)
+    d[chain] = {"usd": usd, "usdc_before": usdc_before, "ts": round(time.time(), 3)}
+    _sat_pending_file(cfg).write_text(json.dumps(d))
+
+
+def clear_satellite_pending(cfg, chain):
+    d = satellite_pending(cfg)
+    if chain in d:
+        d.pop(chain)
+        _sat_pending_file(cfg).write_text(json.dumps(d))
+
+
 def append_jsonl(path, obj):
     with open(path, "a") as f:
         f.write(json.dumps(obj, separators=(",", ":")) + "\n")

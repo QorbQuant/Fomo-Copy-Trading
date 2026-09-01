@@ -459,6 +459,7 @@ class Executor:
                         lib.unmark_satellite_active(self.cfg, sname)
                 except Exception as e:
                     print(f"  [exec warn] satellite {sname} valuation failed, NAV excludes it: {e}")
+            away += self.satellite_pending_usd()  # USDC bridged out but not yet landed
         else:
             away += uint(self.call(self.dep["vault"], "sleeveFundedAsset()(uint256)")) / 1e6
         for real_addr, tok in self.state["token_map"].items():
@@ -473,6 +474,33 @@ class Executor:
 
     def compute_nav_usd(self):
         return self.compute_nav_split()[0]
+
+    def satellite_pending_usd(self):
+        """USDC bridged to satellites (fundDestination) that has left the vault
+        but not yet landed at the keeper — in-flight value, counted in NAV so the
+        fund bridge stays NAV-neutral. Clears an entry the moment the delivery
+        lands (keeper_holdings then counts it, so no double-count) or after a 1h
+        timeout (assume the order failed; stop counting phantom NAV)."""
+        total = 0.0
+        for chain, p in list(lib.satellite_pending(self.cfg).items()):
+            sat = self.cfg.get("satellites", {}).get(chain)
+            if not sat:
+                lib.clear_satellite_pending(self.cfg, chain)
+                continue
+            udec = sat.get("usdc_decimals", 6)
+            try:
+                bal = uint(self.call(sat["usdc"], "balanceOf(address)(uint256)", E["DEPLOYER"])) / 10 ** udec
+            except RuntimeError:
+                total += p["usd"]  # can't check right now — assume still in flight
+                continue
+            if bal >= p["usdc_before"] + p["usd"] * 0.9:
+                lib.clear_satellite_pending(self.cfg, chain)  # landed; holdings counts it now
+            elif time.time() - p["ts"] > 3600:
+                print(f"  [exec warn] {chain} fund bridge not landed in 1h — dropping from NAV")
+                lib.clear_satellite_pending(self.cfg, chain)
+            else:
+                total += p["usd"]
+        return total
 
     def post_nav(self, force=False):
         # Only the on-chain postNav tx costs gas; NAV computation + the file the
@@ -765,6 +793,9 @@ class Executor:
                 # the chain is now active (holds vault capital) — count it in NAV
                 # and deliver gas alongside the USDC so the first trade can fire.
                 lib.mark_satellite_active(self.cfg, req["chain"])
+                # track the bridged USDC as in-flight (left the vault, not yet at
+                # the satellite) so the ~15-90s bridge window stays NAV-neutral.
+                lib.mark_satellite_pending(self.cfg, req["chain"], amount, have)
                 try:
                     import gas
                     gas.ensure_satellite_gas(self.cfg, req["chain"], sat)
