@@ -122,10 +122,16 @@ def rpc(url, method, params, retries=3):
             if "error" in body:
                 raise RuntimeError(f"RPC error for {method}: {body['error']}")
             return body["result"]
-        except (requests.RequestException, RuntimeError):
+        except (requests.RequestException, RuntimeError) as e:
             if attempt == retries - 1:
                 raise
-            time.sleep(1.5 * (attempt + 1))
+            wait = 1.5 * (attempt + 1)
+            resp = getattr(e, "response", None)
+            if resp is not None and getattr(resp, "status_code", 0) == 429:
+                # rate limited: back off harder, honoring Retry-After if given
+                ra = resp.headers.get("Retry-After")
+                wait = max(wait, float(ra) if ra else 2.0 * (attempt + 2))
+            time.sleep(wait)
 
 
 def pad_address(addr):

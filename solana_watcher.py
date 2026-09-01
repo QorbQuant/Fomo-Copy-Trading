@@ -46,14 +46,33 @@ def fetch_signatures(cfg, address, until=None, limit=100):
 
 
 def fetch_token_accounts(cfg):
-    """All of the trader's token-account (ATA) addresses across both programs."""
+    """(pubkey, ui_balance) for all of the trader's ATAs across both programs.
+    The balance rides along in the same jsonParsed response — no extra RPC."""
     trader = cfg["trader"]["solana_address"]
     accounts = []
     for program in TOKEN_PROGRAMS:
         res = sol_rpc(cfg, "getTokenAccountsByOwner",
                       [trader, {"programId": program}, {"encoding": "jsonParsed"}])
-        accounts.extend(v["pubkey"] for v in (res or {}).get("value", []))
+        for v in (res or {}).get("value", []):
+            info = v["account"]["data"]["parsed"]["info"]
+            bal = float((info.get("tokenAmount") or {}).get("uiAmount") or 0)
+            accounts.append((v["pubkey"], bal))
     return accounts
+
+
+def select_atas(cfg, atas):
+    """Bound the watched ATA set. A very active wallet (frankdegods: ~1700 ATAs)
+    would blow past the RPC rate limit if every ATA were polled. Watch the
+    largest current positions instead — dormant zero/dust ATAs from long-closed
+    trades almost never trade again, and fresh buys are picked up by the periodic
+    re-discovery. max_ata=0 disables the cap (small wallets like AJC)."""
+    cap = cfg["solana"].get("max_ata", 0)
+    if cap and len(atas) > cap:
+        kept = sorted(atas, key=lambda p: -p[1])[:cap]
+        print(f"  [sol] {len(atas)} ATAs -> watching top {cap} by balance "
+              f"(dust/closed positions skipped to stay under RPC limits)")
+        return kept
+    return atas
 
 
 def fetch_tx(cfg, signature):
@@ -203,7 +222,8 @@ def main():
             {"last_sigs": last_sigs, "seen": list(seen)[-5000:]}))
 
     wallet = cfg["trader"]["solana_address"]
-    accounts = [wallet] + fetch_token_accounts(cfg)
+    atas = select_atas(cfg, fetch_token_accounts(cfg))
+    accounts = [wallet] + [a for a, _bal in atas]
     mode = "EXECUTES on sleeve" if cfg.get("_out_suffix", "") == "" else "PAPER only (observation)"
     print(f"Watching @{cfg['_trader_key']} — {len(accounts) - 1} token accounts + wallet on "
           f"solana [{mode}] -> copy_trades{cfg.get('_out_suffix', '')}.jsonl.")
@@ -239,10 +259,14 @@ def main():
         cycles += 1
         try:
             if cycles % 120 == 0:  # discover ATAs for newly bought tokens
-                for acct in fetch_token_accounts(cfg):
-                    if acct not in last_sigs:
-                        accounts.append(acct)
-                        last_sigs[acct] = None
+                cap = cfg["solana"].get("max_ata", 0)
+                fresh = [(a, b) for a, b in fetch_token_accounts(cfg)
+                         if a not in last_sigs and b > 0]
+                for acct, _bal in sorted(fresh, key=lambda p: -p[1]):
+                    if cap and len(last_sigs) >= cap + 50:
+                        break  # stay bounded; a fresh buy re-enters next cycle if larger
+                    accounts.append(acct)
+                    last_sigs[acct] = None
             batch = {}
             for acct in list(last_sigs):
                 new = fetch_signatures(cfg, acct, until=last_sigs[acct],
