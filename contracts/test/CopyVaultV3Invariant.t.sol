@@ -109,14 +109,6 @@ contract CopyVaultV3InvariantTest is Test {
         targetContract(address(handler));
     }
 
-    // The bespoke cap ledger stays internally consistent: the global counter is
-    // always exactly the sum of the per-address counters.
-    function invariant_totalDepositedEqualsSumOfPerAddress() public view {
-        uint256 sum;
-        for (uint256 i = 0; i < actors.length; i++) sum += vault.depositedAssets(actors[i]);
-        assertEq(vault.totalDeposited(), sum);
-    }
-
     // ERC20 supply conservation: no shares are minted or burned into thin air.
     function invariant_supplyEqualsSumOfBalances() public view {
         uint256 sum;
@@ -131,8 +123,10 @@ contract CopyVaultV3InvariantTest is Test {
         }
     }
 
+    // Real-time TVL cap: live NAV never exceeds the ceiling (the fuzz re-posts NAV
+    // flat, so it only grows via capped deposits and shrinks on redeem).
     function invariant_tvlCapNeverExceeded() public view {
-        assertLe(vault.totalDeposited(), TVL_CAP);
+        assertLe(vault.totalNavAsset(), TVL_CAP);
     }
 
     // Prove the campaign actually exercised the deposit and redeem paths, so the

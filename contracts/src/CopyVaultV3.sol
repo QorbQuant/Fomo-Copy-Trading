@@ -93,11 +93,12 @@ contract CopyVaultV3 is MiniERC20 {
     mapping(address => uint256) public depositedAssets;
 
     /// Temporary global TVL ceiling (asset units; 0 = no cap). Bounds the size of
-    /// the whole honeypot during the un-audited beta. totalDeposited tracks live
-    /// principal across all addresses and stays equal to the sum of depositedAssets
-    /// while a cap is active. Owner sets it to 0 to lift.
+    /// the whole honeypot during the un-audited beta. Checked in REAL TIME at
+    /// deposit against live NAV (totalNavAsset), NOT a running deposit counter — a
+    /// counter never migrates when shares are transferred, so
+    /// deposit -> transfer -> redeem-elsewhere would ratchet it up permanently and
+    /// brick all future deposits. Owner sets it to 0 to lift.
     uint256 public maxTotalDeposits;
-    uint256 public totalDeposited;
 
     // fees
     uint256 public depositFeeBps;  // <= 200 (2%): one-time entry fee
@@ -499,8 +500,16 @@ contract CopyVaultV3 is MiniERC20 {
     /// Make the redemption withdraw-delay follow the shares: any address that
     /// receives shares (mint or transfer) starts its own delay, so the lock can't
     /// be dodged by minting at a stale NAV and moving the shares to a fresh key.
-    function _afterTokenTransfer(address, address to, uint256 amount) internal override {
-        if (to != address(0) && amount > 0) lastDepositAt[to] = block.timestamp;
+    function _afterTokenTransfer(address from, address to, uint256 amount) internal override {
+        // Follow the withdraw-delay to a FRESH recipient (closes the "mint at a
+        // stale NAV, move shares to a new key" dodge) but NEVER let a dust transfer
+        // re-arm an EXISTING holder's clock — that would let anyone grief-lock a
+        // victim's redemption at ~1 wei/interval. Deposits arm their own lock in
+        // deposit(); mints skip this. Post-update, balanceOf[to] == amount iff `to`
+        // was previously empty.
+        if (from != address(0) && amount > 0 && balanceOf[to] == amount) {
+            lastDepositAt[to] = block.timestamp;
+        }
     }
 
     // -------- sleeve* wrappers (backward compat: Solana destination) --------
@@ -544,13 +553,15 @@ contract CopyVaultV3 is MiniERC20 {
         returns (uint256 shares)
     {
         require(assets > 0, "zero");
-        if (maxDepositPerAddress > 0 || maxTotalDeposits > 0) {
+        if (maxDepositPerAddress > 0) {
             uint256 principal = depositedAssets[msg.sender] + assets;
-            if (maxDepositPerAddress > 0) require(principal <= maxDepositPerAddress, "deposit cap");
+            require(principal <= maxDepositPerAddress, "deposit cap");
             depositedAssets[msg.sender] = principal;
-            uint256 tvl = totalDeposited + assets;
-            if (maxTotalDeposits > 0) require(tvl <= maxTotalDeposits, "tvl cap");
-            totalDeposited = tvl;
+        }
+        // Real-time TVL check: live NAV plus this deposit must fit under the cap.
+        // No running counter (would strand on transfer+redeem and brick deposits).
+        if (maxTotalDeposits > 0) {
+            require(totalNavAsset + assets <= maxTotalDeposits, "tvl cap");
         }
         require(asset.transferFrom(msg.sender, address(this), assets), "transfer");
 
@@ -615,15 +626,13 @@ contract CopyVaultV3 is MiniERC20 {
             totalNavAsset = nav > 0 ? nav - nav * shares / supplyBefore : 0;
         }
 
-        // Release tracked deposit principal in proportion to the shares burned, so
-        // an address that exits frees up room under the per-address and TVL caps.
-        if (maxDepositPerAddress > 0 || maxTotalDeposits > 0) {
-            uint256 tracked = depositedAssets[msg.sender];
-            if (tracked > 0) {
-                uint256 reduce = tracked * sharesToBurn / balanceOf[msg.sender]; // pre-burn balance
-                depositedAssets[msg.sender] = tracked - reduce; // reduce <= tracked
-                totalDeposited = totalDeposited > reduce ? totalDeposited - reduce : 0;
-            }
+        // Release this address's tracked deposit principal in proportion to the
+        // shares burned, so a full exit frees its room under maxDepositPerAddress.
+        // (The global cap is real-time NAV-based, so nothing to release there.)
+        uint256 tracked = depositedAssets[msg.sender];
+        if (tracked > 0) {
+            uint256 reduce = tracked * sharesToBurn / balanceOf[msg.sender]; // pre-burn balance
+            depositedAssets[msg.sender] = tracked - reduce; // reduce <= tracked
         }
         _burn(msg.sender, sharesToBurn);
 

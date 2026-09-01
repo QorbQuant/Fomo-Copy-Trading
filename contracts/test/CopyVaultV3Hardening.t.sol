@@ -278,7 +278,7 @@ contract CopyVaultV3HardeningTest is Test {
         // ...up to the ceiling is fine
         vm.prank(bob);
         vault.deposit(500e6, 0);
-        assertEq(vault.totalDeposited(), 1_500e6);
+        assertEq(vault.totalNavAsset(), 1_500e6);
     }
 
     function test_tvlCapFreedByRedeem() public {
@@ -292,11 +292,11 @@ contract CopyVaultV3HardeningTest is Test {
         uint256 aliceShares = vault.balanceOf(alice);
         vm.prank(alice);
         vault.redeemInKind(aliceShares, alice);
-        assertEq(vault.totalDeposited(), 0); // ceiling freed
+        assertEq(vault.totalNavAsset(), 0); // ceiling freed
 
         vm.prank(bob);
         vault.deposit(1_000e6, 0); // now bob can fill it
-        assertEq(vault.totalDeposited(), 1_000e6);
+        assertEq(vault.totalNavAsset(), 1_000e6);
     }
 
     // ---- NAV-post cooldown (anti-ratchet) ----
@@ -366,6 +366,60 @@ contract CopyVaultV3HardeningTest is Test {
         uint256 before = owner.balance;
         vault.rescue(address(0), owner);
         assertEq(owner.balance - before, 1 ether);
+    }
+
+    // ---- review follow-up: withdraw-delay hook must not be grief-able ----
+
+    function test_dustTransferCannotGriefLockRedemption() public {
+        seed(1_000e6);
+        vm.warp(block.timestamp + vault.withdrawDelay() + 1); // alice unlocked
+        // bob acquires a share and sprays 1 wei at alice right before she exits
+        vm.prank(alice);
+        IERC20(address(vault)).transfer(bob, 1);
+        vm.prank(bob);
+        IERC20(address(vault)).transfer(alice, 1);
+        // alice is an existing holder — her clock must NOT be re-armed
+        assertLt(vault.lastDepositAt(alice) + vault.withdrawDelay(), block.timestamp);
+        uint256 sh = vault.balanceOf(alice); // hoist: a view here would consume the prank
+        vm.prank(alice);
+        vault.redeemInKind(sh, alice); // must not revert
+    }
+
+    function test_freshRecipientStillInheritsDelay() public {
+        seed(1_000e6);
+        vm.prank(alice);
+        IERC20(address(vault)).transfer(carol, 500e18); // carol was empty
+        // carol's clock is armed now, so she is still locked
+        vm.warp(block.timestamp + vault.withdrawDelay() - 10);
+        vm.prank(carol);
+        vm.expectRevert(CopyVaultV3.WithdrawLocked.selector);
+        vault.redeemInKind(100e18, carol);
+    }
+
+    // ---- review follow-up: TVL cap can't be ratcheted via transfer+redeem ----
+
+    function test_tvlCapNotRatchetedByShareTransfer() public {
+        vault.setMaxTotalDeposits(2_000e6);
+        vm.prank(alice);
+        vault.deposit(1_000e6, 0);
+        vm.prank(keeper);
+        vault.postNav(1_000e6, 0);
+
+        // alice moves all shares to bob, who then redeems everything elsewhere
+        uint256 aliceSh = vault.balanceOf(alice); // hoist: a view arg would consume the prank
+        vm.prank(alice);
+        IERC20(address(vault)).transfer(bob, aliceSh);
+        vm.warp(block.timestamp + vault.withdrawDelay() + 1);
+        uint256 bobSh = vault.balanceOf(bob);
+        vm.prank(bob);
+        vault.redeemInKind(bobSh, bob);
+
+        // true TVL is ~0, so the ceiling is free again. A running-total cap would
+        // have stayed pinned at 1,000 forever (deposit->transfer->redeem-elsewhere
+        // never decrements it), permanently bricking deposits. Real-time cap can't.
+        assertEq(vault.totalNavAsset(), 0);
+        vm.prank(alice);
+        vault.deposit(2_000e6, 0); // full-size deposit still succeeds
     }
 
     // owner needs to be able to receive ETH for the rescue test
