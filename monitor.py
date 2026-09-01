@@ -36,6 +36,19 @@ def _env():
     return lib._read_env()
 
 
+def _post_webhook(url, line):
+    """Format the payload for whichever webhook the URL points at. Slack and
+    generic incoming-webhooks take {"text"}; Discord takes {"content"}; Telegram
+    sendMessage takes {"text"} plus a chat_id already in the URL query."""
+    try:
+        if "discord.com" in url or "discordapp.com" in url:
+            requests.post(url, json={"content": line}, timeout=10)
+        else:  # Slack, Telegram sendMessage (chat_id in URL), and generic
+            requests.post(url, json={"text": line}, timeout=10)
+    except requests.RequestException:
+        pass
+
+
 def alert(cfg, key, severity, msg, state):
     now = time.time()
     last = state.get("alerts", {}).get(key, 0)
@@ -46,10 +59,7 @@ def alert(cfg, key, severity, msg, state):
     print("ALERT " + line)
     url = _env().get("ALERT_WEBHOOK")
     if url:
-        try:
-            requests.post(url, json={"text": line}, timeout=10)
-        except requests.RequestException:
-            pass
+        _post_webhook(url, line)
 
 
 def clear(state, key):

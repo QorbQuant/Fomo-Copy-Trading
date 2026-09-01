@@ -1,0 +1,11 @@
+[Unit]
+Description=fomo copy-vault: health monitor -> webhook alerts (gas, NAV staleness, wedged executor, stuck bridges, NAV drop)
+
+[Service]
+Type=oneshot
+User=fomo
+WorkingDirectory=/home/fomo/fomo-copy-vault
+Environment=PATH=/home/fomo/.foundry/bin:/usr/bin:/bin
+# Pushes alerts only if ALERT_WEBHOOK is set in contracts/.env; otherwise it just
+# logs to the journal. Never alerts more than hourly per distinct problem.
+ExecStart=/usr/bin/python3 /home/fomo/fomo-copy-vault/monitor.py
