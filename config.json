@@ -54,6 +54,13 @@
       "solana_address": "498g1rVnFcnjBjpfw1xyqA1WvgQXUU8RWuELjxkjAayQ",
       "ref_capital_usd": 1000000,
       "_resolved": "fomowalletfinder 2026-09-01, both VERIFIED; EVM corroborated on-chain: EIP-7702 delegated to 0xe6cae83b... (same fomo delegate impl as AJC) on robinhood + base"
+    },
+    "orangie": {
+      "handle": "orangie",
+      "evm_address": "0x0eb6f8e5c8bc7d5c920d485b7b3d52e56cdef21f",
+      "solana_address": "83b2LMf12aLec92kur3duRA8VvUkLaXUtML31aCcZNCM",
+      "ref_capital_usd": 1000000,
+      "_resolved": "fomowalletfinder 2026-09-01, both VERIFIED (120K followers); EVM corroborated on-chain: EIP-7702 delegated to 0xe6cae83b... (same fomo impl) on robinhood nonce3 + base nonce1"
     }
   },
   "_comment_satellites": "Per-chain Uniswap DEX config for satellite execution (keeper swaps its own USDC directly, no vault contract). Addresses verified on-chain. Add bnb/ethereum/monad/arc here as each is brought online.",
