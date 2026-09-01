@@ -92,7 +92,7 @@ contract CopyVaultV3Test is Test {
     // ---- deposit fee ----
 
     function test_depositFeeToTreasury() public {
-        vault.setFees(100, 0); // 1% deposit fee
+        vault.setFees(100, 0, 0); // 1% deposit fee
         vm.prank(alice);
         uint256 shares = vault.deposit(1_000e6, 0);
         assertEq(usdc.balanceOf(treasury), 10e6); // 1% skimmed
@@ -103,7 +103,7 @@ contract CopyVaultV3Test is Test {
     // ---- performance fee with high-water mark ----
 
     function test_perfFeeCrystallizesOnGain() public {
-        vault.setFees(0, 1000); // 10% perf fee
+        vault.setFees(0, 0, 1000); // 10% perf fee
         seed(1_000e6); // hwm seeded at pps = 1e6
         vm.warp(block.timestamp + vault.withdrawDelay() + 1);
 
@@ -128,7 +128,7 @@ contract CopyVaultV3Test is Test {
     }
 
     function test_noPerfFeeWhenFlat() public {
-        vault.setFees(0, 1000);
+        vault.setFees(0, 0, 1000);
         seed(1_000e6);
         vm.warp(block.timestamp + vault.withdrawDelay() + 1);
         vm.prank(keeper);
@@ -136,6 +136,75 @@ contract CopyVaultV3Test is Test {
         vm.prank(alice);
         vault.redeemInKind(100e18, alice);
         assertEq(vault.balanceOf(treasury), 0);
+    }
+
+    // ---- management / AUM fee (continuous, streamed to treasury) ----
+
+    function test_mgmtFeeAccruesOverTime() public {
+        vault.setFees(0, 200, 0); // 2%/yr AUM fee, nothing else
+        seed(1_000e6);            // lastAccrualTs starts at first deposit
+        vm.warp(block.timestamp + 365 days);
+        vault.accrue();           // permissionless crystallization
+        uint256 tShares = vault.balanceOf(treasury);
+        assertApproxEqAbs(tShares, 20.408e18, 0.05e18);
+        // the treasury's shares are worth ~2% of the $1,000 NAV
+        uint256 tVal = tShares * vault.pricePerShare() / 1e18;
+        assertApproxEqAbs(tVal, 20e6, 0.1e6);
+    }
+
+    function test_mgmtFeeProRataByTime() public {
+        vault.setFees(0, 200, 0);
+        seed(1_000e6);
+        vm.warp(block.timestamp + 182 days + 12 hours); // ~half a year
+        vault.accrue();
+        uint256 tVal = vault.balanceOf(treasury) * vault.pricePerShare() / 1e18;
+        assertApproxEqAbs(tVal, 10e6, 0.1e6); // ~1% for half a year at 2%/yr
+    }
+
+    function test_mgmtFeeCapEnforced() public {
+        vm.expectRevert(bytes("mgmt fee"));
+        vault.setFees(0, 501, 0); // > 5%/yr
+        vault.setFees(0, 500, 0); // at cap ok
+        assertEq(vault.mgmtFeeBps(), 500);
+    }
+
+    function test_accrueIsPermissionless() public {
+        vault.setFees(0, 200, 0);
+        seed(1_000e6);
+        vm.warp(block.timestamp + 365 days);
+        vm.prank(alice); // not owner, not keeper
+        vault.accrue();
+        assertGt(vault.balanceOf(treasury), 0);
+    }
+
+    function test_mgmtFeeSurvivesFrequentAccrue() public {
+        // Small vault + high rate: a 1s step truncates the per-call fee to 0.
+        vault.setFees(0, 500, 0); // 5%/yr
+        seed(300e6);              // $300 — feeAssets rounds to 0 for tiny dt
+        // Hammer the permissionless accrue() every second. Under the buggy
+        // always-advance clock this starves the fee to exactly zero; with the
+        // remainder-preserving clock the elapsed time is charged as it rounds up.
+        for (uint256 i = 0; i < 200; i++) {
+            vm.warp(block.timestamp + 1);
+            vault.accrue();
+        }
+        assertGt(vault.balanceOf(treasury), 0); // would be 0 if time were dropped
+    }
+
+    function test_mgmtAndPerfFeesStack() public {
+        vault.setFees(0, 200, 1000); // 2%/yr AUM + 10% performance
+        seed(1_000e6);               // hwm seeded at pps 1e6
+        vm.warp(block.timestamp + 365 days);
+        vm.prank(keeper);
+        vault.postNav(1_500e6, 0);   // +50% gross over the year
+        vault.accrue();
+        // both fees minted: mgmt ~2% of 1,500 (~$30) plus perf ~10% of the gain
+        // above HWM net of mgmt (~$48) => ~$77 of treasury value; well above the
+        // ~$30 that mgmt alone would produce.
+        uint256 tVal = vault.balanceOf(treasury) * vault.pricePerShare() / 1e18;
+        assertGt(tVal, 70e6);
+        assertLt(tVal, 85e6);
+        assertGt(vault.hwm(), 1e6); // high-water mark advanced
     }
 
     // ---- away-aware in-kind redemption: the cross-chain haircut fix ----

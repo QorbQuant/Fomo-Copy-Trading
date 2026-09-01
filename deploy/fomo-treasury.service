@@ -1,0 +1,11 @@
+[Unit]
+Description=fomo copy-vault: realize treasury fee shares -> gas/buyback (v3, config-gated)
+
+[Service]
+Type=oneshot
+User=fomo
+WorkingDirectory=/home/fomo/fomo-copy-vault
+Environment=PATH=/home/fomo/.foundry/bin:/usr/bin:/bin
+# Safe to install pre-v3: the script no-ops unless treasury.enabled=true AND the
+# deployed vault is v3 (deployments.json vault_version:3).
+ExecStart=/usr/bin/python3 /home/fomo/fomo-copy-vault/treasury.py --run --mainnet

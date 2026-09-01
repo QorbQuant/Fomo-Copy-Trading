@@ -1,0 +1,9 @@
+[Unit]
+Description=Realize treasury fee shares every 6 hours (v3, config-gated)
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=6h
+
+[Install]
+WantedBy=timers.target

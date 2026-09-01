@@ -46,6 +46,7 @@ contract CopyVaultV3 is MiniERC20 {
     uint256 internal constant SOLANA = 7565164; // deBridge Solana chain id
     uint256 public constant MAX_WITHDRAW_DELAY = 7 days;
     uint256 internal constant WAD = 1e18;
+    uint256 internal constant YEAR = 365 days;
 
     IERC20 public immutable asset;
     IWETH public immutable weth;
@@ -75,9 +76,11 @@ contract CopyVaultV3 is MiniERC20 {
     mapping(address => uint256) public lastDepositAt;
 
     // fees
-    uint256 public depositFeeBps;  // <= 200 (2%)
-    uint256 public perfFeeBps;     // <= 2000 (20%)
+    uint256 public depositFeeBps;  // <= 200 (2%): one-time entry fee
+    uint256 public mgmtFeeBps;     // <= 500 (5%/yr): continuous AUM fee, streamed to treasury
+    uint256 public perfFeeBps;     // <= 2000 (20%): on gains above the high-water mark
     uint256 public hwm;            // high-water price-per-share (WAD-scaled)
+    uint256 public lastAccrualTs;  // last time the management fee was crystallized
 
     // NAV-funded gas
     uint256 public maxGasSweepBps;   // <= 100 (1% of NAV per sweep); 0 = disabled
@@ -109,6 +112,7 @@ contract CopyVaultV3 is MiniERC20 {
     event Unpaused(address indexed by);
     event DepositFeeTaken(uint256 fee);
     event PerfFeeCrystallized(uint256 feeShares, uint256 feeAssets);
+    event MgmtFeeAccrued(uint256 feeShares, uint256 feeAssets);
     event GasSwept(uint256 usdgIn, uint256 ethOut);
     event OwnershipTransferStarted(address indexed newOwner);
     event OwnershipTransferred(address indexed newOwner);
@@ -165,6 +169,7 @@ contract CopyVaultV3 is MiniERC20 {
         guardian = guardian_;
         treasury = treasury_;
         router = router_;
+        lastAccrualTs = block.timestamp;
     }
 
     // ---------------------------------------------------------------- ownership
@@ -211,13 +216,15 @@ contract CopyVaultV3 is MiniERC20 {
         navTtl = navTtl_;
     }
 
-    function setFees(uint256 depositFeeBps_, uint256 perfFeeBps_) external onlyOwner {
-        require(depositFeeBps_ <= 200, "deposit fee");
-        require(perfFeeBps_ <= 2000, "perf fee");
-        // crystallize at the old rate before changing, so a rate change can't
-        // retroactively re-price gains already accrued.
-        _crystallizeFee();
+    function setFees(uint256 depositFeeBps_, uint256 mgmtFeeBps_, uint256 perfFeeBps_) external onlyOwner {
+        require(depositFeeBps_ <= 200, "deposit fee");   // 2% entry cap
+        require(mgmtFeeBps_ <= 500, "mgmt fee");         // 5%/yr AUM cap
+        require(perfFeeBps_ <= 2000, "perf fee");        // 20% performance cap
+        // accrue at the OLD rates before changing, so a rate change can't
+        // retroactively re-price fees already earned.
+        _accrueFees();
         depositFeeBps = depositFeeBps_;
+        mgmtFeeBps = mgmtFeeBps_;
         perfFeeBps = perfFeeBps_;
     }
 
@@ -452,11 +459,12 @@ contract CopyVaultV3 is MiniERC20 {
             shares = net * WAD / 10 ** assetDecimals;
             totalNavAsset = net;
             _mint(msg.sender, shares);
-            hwm = _pps(); // seed the high-water mark at the opening price
+            hwm = _pps();                    // seed the high-water mark at the opening price
+            lastAccrualTs = block.timestamp; // start the AUM clock at first capital
         } else {
             if (_navStale()) revert StaleNav();
             require(totalNavAsset > 0, "nav zero");
-            _crystallizeFee(); // charge accrued perf fee before new money enters
+            _accrueFees(); // charge accrued AUM + perf fees before new money enters
             shares = net * totalSupply / totalNavAsset;
             totalNavAsset += net;
             _mint(msg.sender, shares);
@@ -475,7 +483,7 @@ contract CopyVaultV3 is MiniERC20 {
         require(shares > 0 && shares <= balanceOf[msg.sender], "shares");
         if (block.timestamp < lastDepositAt[msg.sender] + withdrawDelay) revert WithdrawLocked();
 
-        _crystallizeFee();
+        _accrueFees();
         uint256 supplyBefore = totalSupply;
         uint256 nav = totalNavAsset;
         uint256 hNav = nav > awayNav ? nav - awayNav : 0;
@@ -507,12 +515,60 @@ contract CopyVaultV3 is MiniERC20 {
         return totalNavAsset * WAD / totalSupply;
     }
 
-    /// Charge the performance fee on gains above the high-water mark by minting
-    /// shares to the treasury (keeps redemption fully in-kind). HWM is set to
-    /// the gross price at which we crystallized, so the same gain band is never
-    /// taxed twice.
-    function _crystallizeFee() internal {
-        if (perfFeeBps == 0 || treasury == address(0) || totalSupply == 0 || totalNavAsset == 0) return;
+    /// Permissionless: crystallize the time-based AUM fee (and any performance
+    /// fee) into treasury shares. Callable by anyone — the keeper runs it on a
+    /// cadence so the management fee streams steadily even during quiet stretches
+    /// with no deposits or redemptions. It can only mint fee shares to the
+    /// treasury, so there is no caller-side advantage to abuse.
+    function accrue() external {
+        _accrueFees();
+    }
+
+    /// Crystallize both fees as shares minted to the treasury (keeps redemption
+    /// fully in-kind — no loose USDG is required to charge a fee):
+    ///  1. Management (AUM) fee: mgmtFeeBps of NAV per year, pro-rated over the
+    ///     elapsed time since the last accrual.
+    ///  2. Performance fee: perfFeeBps of gains above the high-water mark. HWM is
+    ///     set to the gross price at crystallization so a gain band is taxed once.
+    /// Both mint via dilution: feeShares s.t. the treasury's new shares are worth
+    /// feeAssets at the current mark. Management accrues first, so the perf fee is
+    /// taken on performance net of the management fee.
+    function _accrueFees() internal {
+        if (totalSupply == 0 || totalNavAsset == 0) {
+            lastAccrualTs = block.timestamp;
+            return;
+        }
+
+        // 1. management / AUM fee — streamed by elapsed time. Only advance the
+        //    accrual clock when a fee actually mints: on a small vault (or under
+        //    frequent accrue() calls) a short dt truncates feeAssets to 0, and
+        //    advancing the clock then would silently drop that elapsed time. By
+        //    leaving lastAccrualTs put on a zero-round, dt keeps growing until it
+        //    rounds to a chargeable amount, so the fee can't be starved.
+        if (mgmtFeeBps == 0 || treasury == address(0)) {
+            lastAccrualTs = block.timestamp; // fee off: keep the clock current (no back-bill when enabled)
+        } else {
+            uint256 dt = block.timestamp - lastAccrualTs;
+            if (dt > 0) {
+                uint256 feeAssets = totalNavAsset * mgmtFeeBps * dt / (10_000 * YEAR);
+                if (feeAssets >= totalNavAsset) {
+                    // pathological (years unaccrued): cap and advance so the
+                    // dilution denominator can't go <= 0
+                    lastAccrualTs = block.timestamp;
+                } else if (feeAssets > 0) {
+                    uint256 feeShares = feeAssets * totalSupply / (totalNavAsset - feeAssets);
+                    if (feeShares > 0) {
+                        _mint(treasury, feeShares);
+                        emit MgmtFeeAccrued(feeShares, feeAssets);
+                        lastAccrualTs = block.timestamp; // advance ONLY when charged
+                    }
+                }
+                // feeAssets rounds to dust: leave lastAccrualTs so no time is lost
+            }
+        }
+
+        // 2. performance fee — gains above the high-water mark
+        if (perfFeeBps == 0 || treasury == address(0)) return;
         uint256 pps = _pps();
         if (hwm == 0) {
             hwm = pps;
@@ -520,15 +576,15 @@ contract CopyVaultV3 is MiniERC20 {
         }
         if (pps <= hwm) return;
         uint256 gainAssets = (pps - hwm) * totalSupply / WAD;
-        uint256 feeAssets = gainAssets * perfFeeBps / 10_000;
-        if (feeAssets == 0 || feeAssets >= totalNavAsset) {
+        uint256 perfAssets = gainAssets * perfFeeBps / 10_000;
+        if (perfAssets == 0 || perfAssets >= totalNavAsset) {
             hwm = pps;
             return;
         }
-        uint256 feeShares = feeAssets * totalSupply / (totalNavAsset - feeAssets);
-        if (feeShares > 0) {
-            _mint(treasury, feeShares);
-            emit PerfFeeCrystallized(feeShares, feeAssets);
+        uint256 perfShares = perfAssets * totalSupply / (totalNavAsset - perfAssets);
+        if (perfShares > 0) {
+            _mint(treasury, perfShares);
+            emit PerfFeeCrystallized(perfShares, perfAssets);
         }
         hwm = pps;
     }

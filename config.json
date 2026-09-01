@@ -92,6 +92,18 @@
     "min_copy_usd": 10,
     "max_slippage_bps": 150
   },
+  "_comment_treasury": "v3 only. The vault mints AUM (management) + performance fee shares to the on-chain treasury address; treasury.py realizes that value and routes it to keeper gas and/or protocol-token buybacks. wallet empty => keeper (DEPLOYER); its key signs redeem+swaps (reuses PRIVATE_KEY when wallet==keeper). buyback stays dormant until buyback_token is set AND the owner has set a USDG->token route on the RouteAdapter. gas_pct + buyback_pct are normalized to 100.",
+  "treasury": {
+    "enabled": false,
+    "wallet": "",
+    "min_realize_usd": 25,
+    "redeem_pct": 100,
+    "gas_pct": 100,
+    "buyback_pct": 0,
+    "buyback_token": "",
+    "burn_buyback": false,
+    "slippage_bps": 300
+  },
   "solana": {
     "rpc": "https://api.mainnet-beta.solana.com",
     "dexscreener_chain_id": "solana",
