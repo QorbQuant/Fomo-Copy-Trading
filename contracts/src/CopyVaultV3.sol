@@ -81,6 +81,16 @@ contract CopyVaultV3 is MiniERC20 {
     /// tokens share decimals (true for the USDC/USDG family used here).
     uint256 public minReturnBps = 9000;
 
+    /// Temporary per-address deposit cap (asset units; 0 = no cap). A training
+    /// wheel for the un-audited beta: bounds how much any single address can put
+    /// at risk. depositedAssets tracks live principal per address — it grows on
+    /// deposit and shrinks pro-rata on redeem, so an address that fully exits can
+    /// deposit again. Owner sets it to 0 to lift the cap once audited. Not sybil-
+    /// proof (deposits can be split across addresses); it caps per-address size,
+    /// not total exposure.
+    uint256 public maxDepositPerAddress;
+    mapping(address => uint256) public depositedAssets;
+
     // fees
     uint256 public depositFeeBps;  // <= 200 (2%): one-time entry fee
     uint256 public mgmtFeeBps;     // <= 500 (5%/yr): continuous AUM fee, streamed to treasury
@@ -120,6 +130,7 @@ contract CopyVaultV3 is MiniERC20 {
     event PerfFeeCrystallized(uint256 feeShares, uint256 feeAssets);
     event MgmtFeeAccrued(uint256 feeShares, uint256 feeAssets);
     event GasSwept(uint256 usdgIn, uint256 ethOut);
+    event MaxDepositPerAddressSet(uint256 cap);
     event OwnershipTransferStarted(address indexed newOwner);
     event OwnershipTransferred(address indexed newOwner);
 
@@ -217,6 +228,12 @@ contract CopyVaultV3 is MiniERC20 {
     function setMinReturnBps(uint256 bps) external onlyOwner {
         require(bps <= 10_000, "bps");
         minReturnBps = bps;
+    }
+
+    /// Temporary beta deposit cap per address (asset units). 0 lifts the cap.
+    function setMaxDepositPerAddress(uint256 cap) external onlyOwner {
+        maxDepositPerAddress = cap;
+        emit MaxDepositPerAddressSet(cap);
     }
 
     /// Eject a token from the redemption payout set even while the vault still
@@ -498,6 +515,11 @@ contract CopyVaultV3 is MiniERC20 {
         returns (uint256 shares)
     {
         require(assets > 0, "zero");
+        if (maxDepositPerAddress > 0) {
+            uint256 principal = depositedAssets[msg.sender] + assets;
+            require(principal <= maxDepositPerAddress, "deposit cap");
+            depositedAssets[msg.sender] = principal;
+        }
         require(asset.transferFrom(msg.sender, address(this), assets), "transfer");
 
         uint256 fee = assets * depositFeeBps / 10_000;
@@ -559,6 +581,16 @@ contract CopyVaultV3 is MiniERC20 {
             // on hand, so a bad NAV post can't trap funds.
             sharesToBurn = shares;
             totalNavAsset = nav > 0 ? nav - nav * shares / supplyBefore : 0;
+        }
+
+        // Release tracked deposit principal in proportion to the shares burned, so
+        // an address that exits frees up room under the per-address cap.
+        if (maxDepositPerAddress > 0) {
+            uint256 tracked = depositedAssets[msg.sender];
+            if (tracked > 0) {
+                uint256 reduce = tracked * sharesToBurn / balanceOf[msg.sender]; // pre-burn balance
+                depositedAssets[msg.sender] = tracked > reduce ? tracked - reduce : 0;
+            }
         }
         _burn(msg.sender, sharesToBurn);
 

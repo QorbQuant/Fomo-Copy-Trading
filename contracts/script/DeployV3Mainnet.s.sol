@@ -54,6 +54,10 @@ contract DeployV3Mainnet is Script {
         vault.setParams(500, 6 hours, 30 minutes);
         // Ship NAV bounds ON: reject any single postNav that moves NAV > 20%.
         vault.setNavBounds(2000);
+        // Temporary beta training-wheel: $500 max deposit per address (USDG, 6dp).
+        // Bounds per-address downside while un-audited; owner lifts it with
+        // setMaxDepositPerAddress(0) once the vault is audited and proven.
+        vault.setMaxDepositPerAddress(500e6);
         // Hand config ownership to the cold key. Two-step: coldOwner must call
         // acceptOwnership() before it controls the vault; until then the deployer
         // is still owner, so do this LAST in the broadcast.

@@ -204,6 +204,65 @@ contract CopyVaultV3HardeningTest is Test {
         assertEq(vault.heldTokensLength(), 0);
     }
 
+    // ---- temporary per-address deposit cap (beta training-wheel) ----
+
+    function test_depositCapEnforcedPerAddress() public {
+        vault.setMaxDepositPerAddress(500e6); // $500
+        // first deposit under the cap is fine
+        vm.prank(alice);
+        vault.deposit(400e6, 0);
+        vm.prank(keeper);
+        vault.postNav(400e6, 0);
+        // a second deposit that would push alice over $500 reverts
+        vm.prank(alice);
+        vm.expectRevert(bytes("deposit cap"));
+        vault.deposit(200e6, 0);
+        // ...but exactly up to the cap is allowed
+        vm.prank(alice);
+        vault.deposit(100e6, 0);
+        assertEq(vault.depositedAssets(alice), 500e6);
+    }
+
+    function test_depositCapIsPerAddressNotGlobal() public {
+        vault.setMaxDepositPerAddress(500e6);
+        vm.prank(alice);
+        vault.deposit(500e6, 0);
+        vm.prank(keeper);
+        vault.postNav(500e6, 0);
+        // bob is a different address: his own $500 is unaffected by alice's
+        vm.prank(bob);
+        vault.deposit(500e6, 0);
+        assertEq(vault.depositedAssets(bob), 500e6);
+    }
+
+    function test_redeemFreesDepositCapRoom() public {
+        vault.setMaxDepositPerAddress(500e6);
+        vm.prank(alice);
+        vault.deposit(500e6, 0); // at the cap
+        vm.prank(keeper);
+        vault.postNav(500e6, 0);
+        vm.warp(block.timestamp + vault.withdrawDelay() + 1);
+
+        // fully exit -> tracked principal returns to ~0
+        uint256 aliceShares = vault.balanceOf(alice); // hoist: a view here would consume the prank
+        vm.prank(alice);
+        vault.redeemInKind(aliceShares, alice);
+        assertEq(vault.depositedAssets(alice), 0);
+
+        // alice can deposit again up to the cap
+        vm.prank(alice);
+        vault.deposit(500e6, 0);
+        assertEq(vault.depositedAssets(alice), 500e6);
+    }
+
+    function test_ownerCanLiftDepositCap() public {
+        vault.setMaxDepositPerAddress(500e6);
+        vault.setMaxDepositPerAddress(0); // lifted
+        vm.prank(alice);
+        vault.deposit(10_000e6, 0); // well over the old cap, now fine
+        assertEq(vault.balanceOf(alice), 10_000e18);
+    }
+
     // ---- M-01: gas-sweep cooldown cannot be set to zero ----
 
     function test_gasSweepCooldownFloor() public {
