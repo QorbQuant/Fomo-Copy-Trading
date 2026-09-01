@@ -319,13 +319,14 @@ _price_cache = {}  # token -> (ts, {"price":..., "liquidity":...})
 PRICE_TTL = 20
 
 
-def token_price_info(token, chain_slug):
+def token_price_info(token, chain_slug, fresh=False):
     """{"price": usd or None, "liquidity": usd, "symbol": str or None} from the
     deepest dexscreener pair on this chain. Solana mints are case-sensitive, so
-    only EVM addresses are lowercased."""
+    only EVM addresses are lowercased. fresh=True bypasses the cache (used to
+    re-verify before excluding a large book position on a suspect fetch)."""
     key = token.lower() if token.startswith("0x") else token
     now = time.time()
-    if key in _price_cache and now - _price_cache[key][0] < PRICE_TTL:
+    if not fresh and key in _price_cache and now - _price_cache[key][0] < PRICE_TTL:
         return _price_cache[key][1]
     info = {"price": None, "liquidity": 0.0, "symbol": None, "volume24h": 0.0,
             "buys24h": 0, "sells24h": 0}

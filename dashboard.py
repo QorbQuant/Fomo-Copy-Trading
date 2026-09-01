@@ -109,6 +109,10 @@ def gather(cfg):
     trades = list(reversed(trades))
     execs = list(reversed(lib.read_jsonl(d / "executions_mainnet.jsonl")))[:16]
 
+    # ---- watchlist trader simulations (paper vaults) ----
+    import simulate as sim_mod
+    sims = sim_mod.simulate_all(cfg)
+
     return {
         "ts": time.time(),
         "trader": trader,
@@ -118,6 +122,7 @@ def gather(cfg):
         "pnl": pnl,
         "trades": trades,
         "execs": execs,
+        "sims": sims,
     }
 
 
@@ -144,6 +149,78 @@ def ago(ts):
 
 NET_LABEL = {"robinhood": "Robinhood", "solana": "Solana", "base": "Base",
              "monad": "Monad", "bnb": "BNB", "ethereum": "Ethereum"}
+
+
+def nav_svg(series, aum, w=560, h=110):
+    """Inline SVG % chart of a sim NAV series (like the vault uPNL chart):
+    area+line vs a 0% baseline, endpoint emphasized. Self-contained, theme-aware
+    via currentColor on the accent."""
+    if len(series) < 2:
+        return '<div class="nochart">not enough data for a chart yet</div>'
+    t0, t1 = series[0][0], series[-1][0]
+    span = max(t1 - t0, 1)
+    pcts = [(v / aum - 1) * 100 for _, v in series]
+    lo, hi = min(pcts + [0]), max(pcts + [0])
+    pad = max((hi - lo) * 0.15, 0.05)
+    lo, hi = lo - pad, hi + pad
+    X = lambda ts: 4 + (ts - t0) / span * (w - 8)
+    Y = lambda p: 4 + (hi - p) / (hi - lo) * (h - 8)
+    pts = [(X(ts), Y((v / aum - 1) * 100)) for ts, v in series]
+    line = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+    area = f"{pts[0][0]:.1f},{Y(0):.1f} " + line + f" {pts[-1][0]:.1f},{Y(0):.1f}"
+    zero = Y(0)
+    ex, ey = pts[-1]
+    return f'''<svg viewBox="0 0 {w} {h}" preserveAspectRatio="none" class="navchart" role="img" aria-label="simulated NAV percent chart">
+      <line x1="4" y1="{zero:.1f}" x2="{w-4}" y2="{zero:.1f}" class="zeroline"/>
+      <polygon points="{area}" class="navarea"/>
+      <polyline points="{line}" class="navline" fill="none"/>
+      <circle cx="{ex:.1f}" cy="{ey:.1f}" r="3" class="navdot"/>
+    </svg>'''
+
+
+def sim_section(sims):
+    if not sims:
+        return ""
+    cards = ""
+    for s in sims:
+        handle = esc(s.get("handle", s["key"]))
+        pt, p1, p24 = s["perf_total"], s["perf_1h"], s["perf_24h"]
+        cls = lambda p: "up" if p >= 0 else "down"
+        if s["n_copied"] == 0:
+            body = (f'<div class="simempty">collecting data &mdash; {s["n_signals"]} signals seen, '
+                    f'{s["n_skipped"]} skipped (below the copy floor), no copyable trades yet</div>')
+        else:
+            rows = ""
+            for c in s["contrib"][:7]:
+                pcls = "up" if c["pnl"] >= 0 else "down"
+                state = "" if c["open"] else " (closed)"
+                rows += (f'<div class="prow"><span class="psym">{esc(c["symbol"])}{state}</span>'
+                         f'<span class="pnet">{esc(NET_LABEL.get(c["chain"], c["chain"]))}</span>'
+                         f'<span class="pval">{fmt_usd(c["value"])}</span>'
+                         f'<span class="pw {pcls}">{c["pnl"]:+,.0f}</span></div>')
+            body = f'''{nav_svg(s["series"], s["aum"])}
+      <div class="simtiles">
+        <div><span class="k">1h</span><span class="v {cls(p1)}">{p1:+.2f}%</span></div>
+        <div><span class="k">24h</span><span class="v {cls(p24)}">{p24:+.2f}%</span></div>
+        <div><span class="k">total</span><span class="v {cls(pt)}">{pt:+.2f}%</span></div>
+        <div><span class="k">trades</span><span class="v mono">{s["n_copied_24h"]}<i>/24h</i> {s["n_copied"]}<i>&nbsp;all</i></span></div>
+        <div><span class="k">positions</span><span class="v mono">{len(s["positions"])}</span></div>
+      </div>
+      <div class="stitle" style="margin-top:10px">contribution &mdash; what is driving the sim</div>
+      {rows}'''
+        cards += f'''
+  <div class="panel sim">
+    <div class="phead"><span class="dot s"></span><h2>@{handle} &mdash; simulated vault</h2>
+      <span class="big">{fmt_usd(s["nav"])}</span></div>
+    <div class="sub simsub">paper: ${s["aum"]:,.0f} start, sized like the live vault &middot;
+      {s["n_skipped"]} signals below the copy floor</div>
+    {body}
+  </div>'''
+    return f'''
+<section class="compare">
+  <div class="stitle">Watchlist &mdash; simulated vaults (paper, no funds)</div>
+  <div class="grid">{cards}</div>
+</section>'''
 
 
 def render(s):
@@ -258,6 +335,7 @@ def render(s):
   --bg:#f5f6f8; --panel:#ffffff; --panel2:#f0f1f4; --line:#e2e4e9;
   --ink:#12151c; --ink2:#5a6072; --ink3:#8a90a0;
   --trader:#e08a1e; --trader-dim:#f6e6cf; --vault:#0e9591; --vault-dim:#d3ecea;
+  --sim:#7c5cd6;
   --up:#0a8a4a; --down:#d6483b; --warn:#c98a10;
   --mono:"IBM Plex Mono", ui-monospace, monospace;
   --sans:"IBM Plex Sans", system-ui, sans-serif;
@@ -266,12 +344,14 @@ def render(s):
   --bg:#0c0e13; --panel:#14171f; --panel2:#1b1f29; --line:#262b37;
   --ink:#eef0f4; --ink2:#a2a9ba; --ink3:#6b7284;
   --trader:#f2a63d; --trader-dim:#33280f; --vault:#2bc0bb; --vault-dim:#0d2b2a;
+  --sim:#a08aec;
   --up:#3fbb6f; --down:#f2675a; --warn:#e0a52a;
 }} }}
 :root[data-theme="dark"] {{
   --bg:#0c0e13; --panel:#14171f; --panel2:#1b1f29; --line:#262b37;
   --ink:#eef0f4; --ink2:#a2a9ba; --ink3:#6b7284;
   --trader:#f2a63d; --trader-dim:#33280f; --vault:#2bc0bb; --vault-dim:#0d2b2a;
+  --sim:#a08aec;
   --up:#3fbb6f; --down:#f2675a; --warn:#e0a52a;
 }}
 * {{ box-sizing:border-box; }}
@@ -356,6 +436,24 @@ section.compare {{ margin:22px 0; }}
 .eval {{ text-align:right; color:var(--ink2); }}
 footer {{ margin-top:26px; color:var(--ink3); font-size:.74rem; font-family:var(--mono);
   text-align:center; }}
+.dot.s {{ background:var(--sim); }}
+.panel.sim .big {{ color:var(--sim); }}
+.simsub {{ color:var(--ink3); font-size:.74rem; margin:-2px 0 10px; }}
+.navchart {{ width:100%; height:110px; display:block; margin:4px 0 10px; }}
+.navline {{ stroke:var(--sim); stroke-width:2; stroke-linejoin:round; }}
+.navarea {{ fill:var(--sim); opacity:.12; }}
+.navdot {{ fill:var(--sim); }}
+.zeroline {{ stroke:var(--line); stroke-width:1; stroke-dasharray:3 3; }}
+.nochart, .simempty {{ color:var(--ink3); font-size:.8rem; font-family:var(--mono);
+  padding:14px 0 10px; }}
+.simtiles {{ display:flex; flex-wrap:wrap; gap:14px; margin:2px 0 4px; }}
+.simtiles > div {{ display:flex; flex-direction:column; }}
+.simtiles .k {{ color:var(--ink2); font-size:.68rem; text-transform:uppercase;
+  letter-spacing:.06em; }}
+.simtiles .v {{ font-family:var(--mono); font-size:1.02rem; font-weight:600; }}
+.simtiles .v i {{ font-style:normal; color:var(--ink3); font-size:.68rem; }}
+.simtiles .v.up, .pw.up {{ color:var(--up); }}
+.simtiles .v.down, .pw.down {{ color:var(--down); }}
 a {{ color:var(--vault); }}
 </style></head><body><div class="wrap">
 <header>
@@ -403,6 +501,8 @@ a {{ color:var(--vault); }}
   <div class="stitle">Live activity &mdash; what AJC did, what the vault did</div>
   <div class="feed">{feed_html or '<div class="ev"><span class="et">&mdash;</span><span></span><span></span><span class="esym">no recent activity</span></div>'}</div>
 </section>
+
+{sim_section(s.get("sims", []))}
 
 <footer>vault {esc(v['address'][:10])}&hellip;{esc(v['address'][-6:])} on Robinhood Chain &middot;
 mirroring across {', '.join(NET_LABEL.get(k,k) for k in sorted(set(list(t['networks'])+list(v['networks']))))}</footer>

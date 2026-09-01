@@ -97,6 +97,19 @@ def fetch_trader_portfolio(cfg):
             pass
         time.sleep(2)
 
+    # Tokens the vault itself holds already passed onboarding (route + liquidity
+    # vetting) — never exclude them from the book on a transient dexscreener
+    # degradation (liquidity=0 on a failed fetch once dropped a $2M PONS mark
+    # and produced a wildly wrong dashboard snapshot).
+    vault_held = set()
+    try:
+        state_file = lib.data_dir(cfg) / "executor_state_mainnet.json"
+        if state_file.exists():
+            vault_held = {a.lower() for a in
+                          json.loads(state_file.read_text()).get("token_map", {})}
+    except (ValueError, OSError):
+        pass
+
     positions, cash, excluded = [], 0.0, []
     for taddr, dec in _robinhood_token_candidates(cfg, items).items():
         bal = _erc20_balance(rpc, taddr, addr, dec)
@@ -112,8 +125,19 @@ def fetch_trader_portfolio(cfg):
             cash += usd
             continue
         hp = lib.honeypot_reason(info)
-        if (info["liquidity"] < MIN_BOOK_LIQUIDITY
-                or usd > info["liquidity"] * MAX_POSITION_VS_LIQUIDITY or hp):
+        trusted = taddr.lower() in vault_held
+        failing = (info["liquidity"] < MIN_BOOK_LIQUIDITY
+                   or usd > info["liquidity"] * MAX_POSITION_VS_LIQUIDITY or hp)
+        if failing and not trusted and usd > 10_000:
+            # big position flunking the gate: could be a transient bad fetch —
+            # refetch once (cache-bypassing) before excluding a real whale position
+            time.sleep(1.0)
+            info = lib.token_price_info(taddr, cfg["chain"]["dexscreener_chain_id"], fresh=True)
+            usd = bal * (info["price"] or 0)
+            hp = lib.honeypot_reason(info)
+            failing = (not info["price"] or info["liquidity"] < MIN_BOOK_LIQUIDITY
+                       or usd > info["liquidity"] * MAX_POSITION_VS_LIQUIDITY or hp)
+        if failing and not trusted:
             excluded.append({"addr": taddr, "symbol": symbol, "usd": usd,
                              "liquidity": info["liquidity"], "reason": hp or "thin/oversized"})
             continue
