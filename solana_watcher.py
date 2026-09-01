@@ -232,11 +232,15 @@ def main():
         cutoff = time.time() - sol["backfill_days"] * 86400
         batch = {}
         for i, acct in enumerate(accounts):
-            for s in fetch_signatures(cfg, acct, limit=sol["backfill_sigs_per_account"]):
-                if s["signature"] not in batch:
-                    batch[s["signature"]] = s
-            head = fetch_signatures(cfg, acct, limit=1)
-            last_sigs[acct] = head[0]["signature"] if head else None
+            try:
+                for s in fetch_signatures(cfg, acct, limit=sol["backfill_sigs_per_account"]):
+                    if s["signature"] not in batch:
+                        batch[s["signature"]] = s
+                head = fetch_signatures(cfg, acct, limit=1)
+                last_sigs[acct] = head[0]["signature"] if head else None
+            except Exception as e:
+                print(f"  [sol backfill warn] {acct[:8]}: {str(e)[:80]}")
+                last_sigs[acct] = None
             if (i + 1) % 10 == 0:
                 print(f"  scanned {i + 1}/{len(accounts)} accounts, {len(batch)} unique sigs")
         recent = sorted((s for s in batch.values() if (s.get("blockTime") or 0) >= cutoff),
@@ -249,8 +253,15 @@ def main():
         print("Backfill done. Following live.")
     elif not last_sigs:
         for acct in accounts:
-            head = fetch_signatures(cfg, acct, limit=1)
-            last_sigs[acct] = head[0]["signature"] if head else None
+            # resilient: a rate-limit (429) on one account skips it rather than
+            # crashing startup; the poll loop below (already fault-tolerant)
+            # picks it up on the next cycle.
+            try:
+                head = fetch_signatures(cfg, acct, limit=1)
+                last_sigs[acct] = head[0]["signature"] if head else None
+            except Exception as e:
+                print(f"  [sol init warn] {acct[:8]} head fetch failed: {str(e)[:80]}")
+                last_sigs[acct] = None
         save()
 
     cycles = 0

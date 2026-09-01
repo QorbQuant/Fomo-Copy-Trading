@@ -120,7 +120,7 @@
     "backfill_sigs_per_account": 100,
     "backfill_days": 3,
     "poll_seconds": 30,
-    "rpc_pause": 0.15,
+    "rpc_pause": 0.35,
     "max_ata": 150
   },
   "watcher": {
