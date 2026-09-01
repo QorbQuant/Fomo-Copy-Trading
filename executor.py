@@ -441,12 +441,22 @@ class Executor:
             # satellite chains marked live: keeper's USDC + positions there are
             # vault capital deployed cross-chain. Gated on "live" so an unfunded
             # or dry-run satellite never touches the NAV path.
+            # count satellites the vault is actually active on: explicitly live,
+            # or funded on-demand (holds capital). Idle candidate chains add $0.
+            active = lib.active_satellites(self.cfg)
             for sname, scfg in self.cfg.get("satellites", {}).items():
-                if not scfg.get("live"):
+                if not (scfg.get("live") or sname in active):
                     continue
                 try:
                     import satellite as sat_mod
-                    away += sat_mod.Satellite(sname).keeper_holdings_usd()
+                    h = sat_mod.Satellite(sname).keeper_holdings_usd()
+                    away += h
+                    # drop only a long-idle chain (holdings gone); the 30-min
+                    # grace avoids unmarking during the ~15-90s fund-bridge window
+                    # when USDC is in flight and not yet in the keeper's balance.
+                    if (sname in active and h < 0.5
+                            and time.time() - active[sname].get("since", 0) > 1800):
+                        lib.unmark_satellite_active(self.cfg, sname)
                 except Exception as e:
                     print(f"  [exec warn] satellite {sname} valuation failed, NAV excludes it: {e}")
         else:
@@ -752,6 +762,14 @@ class Executor:
                 lib.append_jsonl(self.exec_log, {"ts": round(time.time(), 3), "kind": "satellite_fund",
                                                  "chain": req["chain"], "usd": round(amount, 2), "vault_tx": tx})
                 print(f"  [exec] funding {req['chain']} satellite: ${amount:,.2f} USDG->USDC ({tx[:12]})")
+                # the chain is now active (holds vault capital) — count it in NAV
+                # and deliver gas alongside the USDC so the first trade can fire.
+                lib.mark_satellite_active(self.cfg, req["chain"])
+                try:
+                    import gas
+                    gas.ensure_satellite_gas(self.cfg, req["chain"], sat)
+                except Exception as e:
+                    print(f"  [exec warn] {req['chain']} gas delivery failed: {str(e)[:80]}")
             except Exception as e:
                 print(f"  [exec warn] satellite {req['chain']} funding failed: {str(e)[:100]}")
 

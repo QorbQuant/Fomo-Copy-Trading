@@ -99,6 +99,38 @@ def request_satellite_funding(cfg, chain_name, chain_id, usd):
         "bridged_at": prev.get("bridged_at", 0)}))
 
 
+# --- active satellites: chains the vault has actually funded (holds capital on).
+# The demand-driven pivot model: candidate chains sit armed + destination-wired
+# with ZERO capital; a chain becomes "active" only once a real trade funds it.
+# NAV counts active chains, and gas is only topped up for active chains — nothing
+# is pre-positioned where the trader has no position.
+
+def _active_sat_file(cfg):
+    return data_dir(cfg) / "active_satellites.json"
+
+
+def active_satellites(cfg):
+    p = _active_sat_file(cfg)
+    try:
+        return json.loads(p.read_text()) if p.exists() else {}
+    except (ValueError, OSError):
+        return {}
+
+
+def mark_satellite_active(cfg, chain):
+    d = active_satellites(cfg)
+    if chain not in d:
+        d[chain] = {"since": round(time.time(), 3)}
+        _active_sat_file(cfg).write_text(json.dumps(d))
+
+
+def unmark_satellite_active(cfg, chain):
+    d = active_satellites(cfg)
+    if chain in d:
+        d.pop(chain)
+        _active_sat_file(cfg).write_text(json.dumps(d))
+
+
 def append_jsonl(path, obj):
     with open(path, "a") as f:
         f.write(json.dumps(obj, separators=(",", ":")) + "\n")

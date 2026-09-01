@@ -107,6 +107,23 @@
       "live": false,
       "gas_target_usd": 2.0,
       "_note": "Monad mainnet live since 2025-11-24, chain 143. usdc is native Circle USDC (6 decimals, CCTP V2). weth is WMON. Uniswap V3/V4 deployed (official docs). CONFIRM deBridge supports Monad before JIT funding via fundDestination — else fund via CCTP (cctp.py). Run --dry-run first."
+    },
+    "ethereum": {
+      "rpc": "https://eth.drpc.org",
+      "chain_id": 1,
+      "dexscreener_chain_id": "ethereum",
+      "usdc": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      "usdc_decimals": 6,
+      "weth": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+      "v3_factory": "0x1F98431c8aD98523631AE4a59f267346ea31F984",
+      "quoter_v2": "0x61fFE014bA17989E743c5F6cB21bF9697530B21e",
+      "swap_router02": "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",
+      "universal_router": "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af",
+      "pool_manager_v4": "0x000000000004444c5dc75cB358380D2e3dE08A90",
+      "v4_quoter": "0x52F0E24D1c21C8A0cB1e5a5dD6198556BD9E1203",
+      "live": false,
+      "gas_target_usd": 4.0,
+      "_note": "Ethereum mainnet L1 — native Circle USDC (6dp), factory+quoter verified on-chain. Gas is pricey here (gas_target_usd higher); a small memecoin copy may not clear gas cost — validate in --dry-run."
     }
   },
   "_comment_cctp": "Circle CCTP V2 rail (native USDC burn-and-mint). TokenMessengerV2/MessageTransmitterV2 are the same on all EVM chains (in cctp.py). Robinhood Chain has NO CCTP domain — it uses deBridge. Arc mainnet addresses publish at the Sept 16 launch; fill arc.rpc/usdc then and it works.",
