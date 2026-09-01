@@ -225,10 +225,14 @@ class Satellite:
                         lines = f.readlines()
                         self.state["offset"] = f.tell()
                     self.save()
+                    primary = self.cfg["trader"].get("handle", "primary")
                     for line in lines:
                         rec = json.loads(line)
+                        # only ever act on the configured primary trader (matches
+                        # the executor guard; observation profiles are paper).
                         if (rec.get("action") == "copy" and not rec.get("backfill")
                                 and rec.get("chain") == self.name
+                                and rec.get("trader", primary) == primary
                                 and time.time() - rec.get("detected_at", 0) <= MAX_SIGNAL_AGE_S):
                             try:
                                 self.execute(rec, nav, dry)

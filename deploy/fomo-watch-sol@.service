@@ -1,0 +1,20 @@
+[Unit]
+Description=fomo copy-vault: observe one profile on Solana (PAPER only). Instance = <trader> key
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=fomo
+WorkingDirectory=/home/fomo/fomo-copy-vault
+Environment=PATH=/home/fomo/.foundry/bin:/usr/local/bin:/usr/bin:/bin
+# Observation only. Deliberately NO SLEEVE_EXECUTE: non-primary traders are gated
+# out of sleeve.handle_copy in code (out != ""), and without SLEEVE_EXECUTE the
+# sleeve is paper even if that gate were ever wrong. Two independent safeguards.
+ExecStart=/usr/bin/python3 /home/fomo/fomo-copy-vault/solana_watcher.py --trader %i --no-backfill
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

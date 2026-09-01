@@ -22,7 +22,7 @@ import time
 import copier
 import lib
 import sleeve
-from watcher import is_funding_token
+from watcher import is_funding_token, select_trader
 
 WSOL_MINT = "So11111111111111111111111111111111111111112"
 SOL_DUST_LAMPORTS = 1_000_000  # ignore <0.001 SOL native movement (rent noise)
@@ -119,6 +119,7 @@ def normalize_tx(cfg, signature, tx, detected_at, backfill):
     block_time = tx.get("blockTime") or 0
     base = {
         "chain": "solana", "dex_chain": chain_slug,
+        "trader": cfg.get("_trader_key", cfg["trader"].get("handle", "primary")),
         "tx_hash": signature, "block": tx.get("slot"), "block_time": block_time,
         "detected_at": round(detected_at, 3), "backfill": backfill,
         "latency_s": None if backfill or not block_time else round(detected_at - block_time, 3),
@@ -158,12 +159,16 @@ def process_signatures(cfg, sig_infos, backfill=False):
         trade = normalize_tx(cfg, info["signature"], tx, time.time(), backfill)
         if trade is None:
             continue
-        lib.append_jsonl(d / "trades.jsonl", trade)
+        out = cfg.get("_out_suffix", "")
+        lib.append_jsonl(d / f"trades{out}.jsonl", trade)
         if trade["kind"] == "swap":
             n += 1
-            rec = copier.plan_copy(cfg, trade, d / "copy_trades.jsonl")
+            rec = copier.plan_copy(cfg, trade, d / f"copy_trades{out}.jsonl")
             fill = None
-            if rec and not backfill:
+            # SAFETY: only the PRIMARY trader (AJC, no --trader) ever executes on
+            # the sleeve. Observation-only profiles (out != "") are paper always —
+            # they must never reach handle_copy, which trades real sleeve funds.
+            if rec and not backfill and out == "":
                 fill = sleeve.handle_copy(cfg, trade, rec)
             a = trade["asset_token"]
             lat = "" if backfill else f" lat={trade['latency_s']}s"
@@ -182,9 +187,10 @@ def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
     cfg = lib.load_config()
+    trader_suffix = select_trader(cfg)
     sol = cfg["solana"]
     d = lib.data_dir(cfg)
-    state_file = d / "state_solana.json"
+    state_file = d / f"state_solana{trader_suffix}.json"
 
     state = {"last_sigs": {}, "seen": []}
     if state_file.exists():
@@ -198,7 +204,9 @@ def main():
 
     wallet = cfg["trader"]["solana_address"]
     accounts = [wallet] + fetch_token_accounts(cfg)
-    print(f"Watching {len(accounts) - 1} token accounts + wallet on solana.")
+    mode = "EXECUTES on sleeve" if cfg.get("_out_suffix", "") == "" else "PAPER only (observation)"
+    print(f"Watching @{cfg['_trader_key']} — {len(accounts) - 1} token accounts + wallet on "
+          f"solana [{mode}] -> copy_trades{cfg.get('_out_suffix', '')}.jsonl.")
 
     if not last_sigs and "--no-backfill" not in sys.argv:
         cutoff = time.time() - sol["backfill_days"] * 86400

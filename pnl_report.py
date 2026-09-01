@@ -3,13 +3,15 @@ hypothetical PnL. Reads data/copy_trades.jsonl (both watchers write there,
 tagged with chain). FIFO accounting per (chain, asset) at copy fill prices;
 open positions marked at current dexscreener price.
 
-    python pnl_report.py
+    python pnl_report.py                    # primary trader (AJC)
+    python pnl_report.py --trader frankdegods   # an observation-only profile
 """
 
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 
 import lib
+from watcher import select_trader
 
 
 def chain_of(r):
@@ -43,21 +45,32 @@ def fifo_pnl(copies):
 
 def main():
     cfg = lib.load_config()
+    suffix = select_trader(cfg)  # --trader <key> reads copy_trades_<key>.jsonl
     d = lib.data_dir(cfg)
-    records = lib.read_jsonl(d / "copy_trades.jsonl")
+    records = lib.read_jsonl(d / f"copy_trades{suffix}.jsonl")
     if not records:
-        print("No copy records yet. Run watcher.py / solana_watcher.py first.")
+        who = f" for @{cfg['_trader_key']}" if suffix else ""
+        print(f"No copy records{who} yet. Run watcher.py / solana_watcher.py first.")
         return
 
     copies = [r for r in records if r["action"] == "copy"]
+    if not copies:
+        skips = len(records)
+        print(f"=== @{cfg['trader']['handle']} (paper): {skips} records, none copyable yet "
+              f"(all below the ${cfg['vault']['min_copy_usd']} min or no USD price). "
+              f"Nothing to report until a large-enough trade lands. ===")
+        return
     realized, positions = fifo_pnl(copies)
 
     chains = sorted({chain_of(r) for r in records})
     print(f"=== fomo copy vault (paper) — @{cfg['trader']['handle']} ===")
-    t0 = min(r["block_time"] for r in copies)
-    t1 = max(r["block_time"] for r in copies)
     fmt = lambda t: datetime.fromtimestamp(t, timezone.utc).strftime("%m-%d %H:%M")
-    print(f"window: {fmt(t0)} .. {fmt(t1)} UTC   vault AUM ${cfg['vault']['aum_usd']:,}\n")
+    # block_time can be 0 for a Solana tx whose RPC omitted blockTime; ignore
+    # those so the window doesn't collapse to 1970. Fall back to detected_at.
+    btimes = ([r["block_time"] for r in copies if r.get("block_time")]
+              or [r["detected_at"] for r in copies if r.get("detected_at")] or [0])
+    print(f"window: {fmt(min(btimes))} .. {fmt(max(btimes))} UTC   "
+          f"vault AUM ${cfg['vault']['aum_usd']:,}\n")
 
     grand_net = 0.0
     for chain in chains:
@@ -69,9 +82,12 @@ def main():
 
         # per-chain window; p10 start dodges backfill stragglers from months back
         times = sorted(r["block_time"] for r in c_all if r.get("block_time"))
-        w0, w1 = times[len(times) // 10], times[-1]
-        days = max((w1 - w0) / 86400, 1 / 24)
-        window_txt = f" over {days:.1f}d ({fmt(w0)}..{fmt(w1)}) = ${trader_vol / days:,.0f}/day"
+        if times:
+            w0, w1 = times[len(times) // 10], times[-1]
+            days = max((w1 - w0) / 86400, 1 / 24)
+            window_txt = f" over {days:.1f}d ({fmt(w0)}..{fmt(w1)}) = ${trader_vol / days:,.0f}/day"
+        else:
+            window_txt = ""
 
         lats = sorted(r["latency_s"] for r in c_cop
                       if not r["backfill"] and r.get("latency_s") is not None)

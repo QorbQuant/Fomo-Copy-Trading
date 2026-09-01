@@ -66,6 +66,9 @@ def _base(trade):
     return {
         "chain": trade.get("chain", "robinhood"),
         "dex_chain": trade.get("dex_chain", "robinhood"),
+        # carry the trader tag so the executor/satellite guards can enforce
+        # "primary only" — the second isolation layer atop file separation.
+        "trader": trade.get("trader", "primary"),
         "tx_hash": trade["tx_hash"],
         "block": trade["block"],
         "block_time": trade["block_time"],

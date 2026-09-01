@@ -1,6 +1,7 @@
 """Shared helpers: JSON-RPC, ERC-20 metadata, dexscreener prices, jsonl logs."""
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -208,7 +209,13 @@ def _decode_string(hexdata):
 def token_meta(rpc_url, token):
     global _tokens_cache
     if _tokens_cache is None:
-        _tokens_cache = json.loads(_TOKENS_FILE.read_text()) if _TOKENS_FILE.exists() else {}
+        # tolerate a partial read: another watcher process (multiple traders /
+        # chains share this file) may be mid-write. Rebuild lazily rather than
+        # crashing trade normalization.
+        try:
+            _tokens_cache = json.loads(_TOKENS_FILE.read_text()) if _TOKENS_FILE.exists() else {}
+        except (ValueError, OSError):
+            _tokens_cache = {}
     token = token.lower()
     if token not in _tokens_cache:
         try:
@@ -217,8 +224,12 @@ def token_meta(rpc_url, token):
         except Exception:
             symbol, decimals = token[:10], 18
         _tokens_cache[token] = {"symbol": symbol, "decimals": decimals}
+        # atomic write: temp + rename, so a concurrent reader never sees a
+        # truncated file (shared across all watcher processes).
         _TOKENS_FILE.parent.mkdir(exist_ok=True)
-        _TOKENS_FILE.write_text(json.dumps(_tokens_cache, indent=1))
+        tmp = _TOKENS_FILE.with_suffix(f".json.tmp{os.getpid()}")
+        tmp.write_text(json.dumps(_tokens_cache, indent=1))
+        os.replace(tmp, _TOKENS_FILE)
     return _tokens_cache[token]
 
 
