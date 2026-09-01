@@ -34,6 +34,9 @@ DEPLOYMENTS = json.loads((ROOT / "contracts" / "deployments.json").read_text())
 MAX_TRADE_FRACTION = 0.049  # stay under the vault's 5% on-chain cap
 SLIPPAGE = 0.03
 MAX_SIGNAL_AGE_S = 600  # never execute a signal detected more than 10 min ago
+SAT_FUND_WINDOW = 240  # a satellite fund bridge is treated as in-flight for this
+                       # long (> deBridge's typical EVM fill); within it NAV uses
+                       # a frozen estimate instead of live holdings (no double-count)
 
 # Robinhood Chain mainnet infra (Uniswap official deployment, chain 4663)
 WETH = "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"
@@ -441,25 +444,35 @@ class Executor:
             # satellite chains marked live: keeper's USDC + positions there are
             # vault capital deployed cross-chain. Gated on "live" so an unfunded
             # or dry-run satellite never touches the NAV path.
-            # count satellites the vault is actually active on: explicitly live,
-            # or funded on-demand (holds capital). Idle candidate chains add $0.
+            # Count satellites the vault is active on (explicitly live, or funded
+            # on-demand). A chain whose fund bridge is still within its landing
+            # window contributes a FROZEN estimate (its pre-fund value + the
+            # bridged amount) and its LIVE holdings are deliberately NOT read —
+            # the two are mutually exclusive, so the landed chunk can never be
+            # double-counted, and no balance/price heuristic can mis-detect the
+            # landing. Once the window elapses, live marks (which by then reflect
+            # the delivery) resume. Idle candidate chains add $0.
+            now = time.time()
             active = lib.active_satellites(self.cfg)
+            pending = lib.satellite_pending(self.cfg)
+            import satellite as sat_mod
             for sname, scfg in self.cfg.get("satellites", {}).items():
                 if not (scfg.get("live") or sname in active):
                     continue
+                p = pending.get(sname)
+                if p and now - p.get("ts", 0) < SAT_FUND_WINDOW:
+                    away += p.get("value_before", 0) + p["usd"]  # bridge in flight
+                    continue
+                if p:  # window elapsed — live holdings now reflect the delivery
+                    lib.clear_satellite_pending(self.cfg, sname)
                 try:
-                    import satellite as sat_mod
                     h = sat_mod.Satellite(sname).keeper_holdings_usd()
                     away += h
-                    # drop only a long-idle chain (holdings gone); the 30-min
-                    # grace avoids unmarking during the ~15-90s fund-bridge window
-                    # when USDC is in flight and not yet in the keeper's balance.
-                    if (sname in active and h < 0.5
-                            and time.time() - active[sname].get("since", 0) > 1800):
+                    # drop only a long-idle chain (holdings gone), after a 30-min grace
+                    if sname in active and h < 0.5 and now - active[sname].get("since", 0) > 1800:
                         lib.unmark_satellite_active(self.cfg, sname)
                 except Exception as e:
                     print(f"  [exec warn] satellite {sname} valuation failed, NAV excludes it: {e}")
-            away += self.satellite_pending_usd()  # USDC bridged out but not yet landed
         else:
             away += uint(self.call(self.dep["vault"], "sleeveFundedAsset()(uint256)")) / 1e6
         for real_addr, tok in self.state["token_map"].items():
@@ -474,40 +487,6 @@ class Executor:
 
     def compute_nav_usd(self):
         return self.compute_nav_split()[0]
-
-    def satellite_pending_usd(self):
-        """USDC bridged to satellites (fundDestination) that has left the vault
-        but is not yet reflected in the keeper's holdings — in-flight value,
-        counted in NAV so the fund bridge stays NAV-neutral.
-
-        Landing is detected by the keeper's TOTAL value (USDC + tokens) rising by
-        ~the bridged amount, NOT by the USDC balance — because the whole reason
-        for the fund is a deferred buy, so the delivered USDC is immediately
-        swapped into a token. Tracking total value keeps that swap (and any
-        token<->USDC sell) from mis-signaling landing. We count only the
-        un-landed remainder, so keeper_holdings and this never double-count."""
-        import satellite as sat_mod
-        total = 0.0
-        for chain, p in list(lib.satellite_pending(self.cfg).items()):
-            if chain not in self.cfg.get("satellites", {}):
-                lib.clear_satellite_pending(self.cfg, chain)
-                continue
-            try:
-                now_val = sat_mod.Satellite(chain).keeper_holdings_usd()
-            except Exception:
-                total += p["usd"]  # can't value it now — assume still in flight
-                continue
-            landed = max(0.0, now_val - p.get("value_before", 0))
-            if landed >= p["usd"] * 0.9:
-                # reflected in holdings (the ~3% gap is the bridge fee) — done
-                lib.clear_satellite_pending(self.cfg, chain)
-            elif time.time() - p["ts"] > 86400:
-                # 24h: like the sleeve's bridge_pending, assume resolved/cancelled
-                print(f"  [exec warn] {chain} fund bridge unresolved 24h — dropping from NAV")
-                lib.clear_satellite_pending(self.cfg, chain)
-            else:
-                total += p["usd"] - landed  # count only what hasn't landed yet
-        return total
 
     def post_nav(self, force=False):
         # Only the on-chain postNav tx costs gas; NAV computation + the file the
