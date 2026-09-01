@@ -63,13 +63,50 @@
       "chain_id": 8453,
       "dexscreener_chain_id": "base",
       "usdc": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "usdc_decimals": 6,
       "weth": "0x4200000000000000000000000000000000000006",
       "v3_factory": "0x33128a8fC17869897dcE68Ed026d694621f6FDfD",
       "quoter_v2": "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a",
       "swap_router02": "0x2626664c2603336E57B271c5C0b26F421741e481",
       "universal_router": "0x6fF5693b99212Da76ad316178A184AB56D299b43",
       "pool_manager_v4": "0x498581fF718922c3f8e6A244956aF099B2652b2b",
-      "v4_quoter": "0x0d5e0F971ED27FBfF6c2837bf31316121532048D"
+      "v4_quoter": "0x0d5e0F971ED27FBfF6c2837bf31316121532048D",
+      "live": false,
+      "gas_target_usd": 2.0
+    },
+    "bnb": {
+      "rpc": "https://bsc-dataseed.binance.org",
+      "chain_id": 56,
+      "dexscreener_chain_id": "bsc",
+      "usdc": "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
+      "usdc_decimals": 18,
+      "weth": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
+      "v3_factory": "0xdB1d10011AD0Ff90774D0C6Bb92e5C5c8b4461F7",
+      "quoter_v2": "0x78D78E420Da98ad378D7799bE8f4AF69033EB077",
+      "swap_router02": "0xB971eF87ede563556b2ED4b1C0b0019111Dd85d2",
+      "universal_router": "0x1906c1d672b88cd1b9ac7593301ca990f94eae07",
+      "pool_manager_v4": "0x28e2ea090877bf75740558f6bfb36a5ffee9e9df",
+      "v4_quoter": "0x9f75dd27d6664c475b90e105573e550ff69437b0",
+      "live": false,
+      "gas_target_usd": 2.0,
+      "_note": "usdc is Binance-Peg USDC (18 decimals!) — verified on-chain. weth is WBNB. PancakeSwap is deeper than Uniswap on BSC; validate pool liquidity in --dry-run before going live."
+    },
+    "monad": {
+      "rpc": "https://rpc.monad.xyz",
+      "chain_id": 143,
+      "dexscreener_chain_id": "monad",
+      "usdc": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+      "usdc_decimals": 6,
+      "weth": "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A",
+      "v3_factory": "0x204faca1764b154221e35c0d20abb3c525710498",
+      "quoter_v2": "0x661e93cca42afacb172121ef892830ca3b70f08d",
+      "swap_router02": "0xfe31f71c1b106eac32f1a19239c9a9a72ddfb900",
+      "universal_router": "0x0d97dc33264bfc1c226207428a79b26757fb9dc3",
+      "pool_manager_v4": "0x188d586ddcf52439676ca21a244753fa19f9ea8e",
+      "v4_quoter": "0xa222dd357a9076d1091ed6aa2e16c9742dd26891",
+      "live": false,
+      "gas_target_usd": 2.0,
+      "_note": "Monad mainnet live since 2025-11-24, chain 143. usdc is native Circle USDC (6 decimals, CCTP V2). weth is WMON. Uniswap V3/V4 deployed (official docs). CONFIRM deBridge supports Monad before JIT funding via fundDestination — else fund via CCTP (cctp.py). Run --dry-run first."
     }
   },
   "_comment_cctp": "Circle CCTP V2 rail (native USDC burn-and-mint). TokenMessengerV2/MessageTransmitterV2 are the same on all EVM chains (in cctp.py). Robinhood Chain has NO CCTP domain — it uses deBridge. Arc mainnet addresses publish at the Sept 16 launch; fill arc.rpc/usdc then and it works.",
@@ -94,8 +131,10 @@
     "auto_bridge": true,
     "buffer_pct": 8,
     "min_bridge_usd": 200,
-    "rotation_bridge_min_usd": 200
+    "rotation_bridge_min_usd": 200,
+    "test_mode": false
   },
+  "_comment_test_mode": "sleeve.test_mode=true drops the bridge amortization floor to ~$1 so satellite JIT funding fires even for tiny trades — for proving the cross-chain path end-to-end when economics don't matter (you'll overpay the ~$4.50 deBridge fee vs the copy size). To bring a satellite live: set satellites.<chain>.live=true, owner setDestination(chainId, receiver=keeper 20b, takeToken=chain USDC, capBps) on the vault, ensure the chain is in ALCHEMY_CHAINS, then run satellite.py --chain <chain> --dry-run to validate routes before live. gas.refill_satellite_gas keeps native gas topped up on live satellites automatically.",
   "vault": {
     "aum_usd": 100000,
     "max_trade_pct": 0.05,

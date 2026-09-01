@@ -704,7 +704,9 @@ class Executor:
         (deBridge to the keeper on that chain). Only bridges when the shortfall
         clears the economic floor, so bridge fees are amortized over a chunk."""
         scfg = self.cfg.get("sleeve", {})
-        floor = scfg.get("rotation_bridge_min_usd", 200)
+        # test_mode drops the amortization floor so the cross-chain path fires
+        # even for tiny trades (proving the mechanism; economics ignored).
+        floor = 1 if scfg.get("test_mode") else scfg.get("rotation_bridge_min_usd", 200)
         import sleeve as sleeve_mod
         for req_file in lib.funding_requests_dir(self.cfg).glob("*.json"):
             try:
@@ -718,8 +720,9 @@ class Executor:
             sat = self.cfg.get("satellites", {}).get(req["chain"])
             if not sat:
                 continue
-            # already funded? clear it
-            have = uint(self.call(sat["usdc"], "balanceOf(address)(uint256)", E["DEPLOYER"])) / 1e6
+            # already funded? clear it (destination USDC decimals vary — BSC is 18)
+            udec = sat.get("usdc_decimals", 6)
+            have = uint(self.call(sat["usdc"], "balanceOf(address)(uint256)", E["DEPLOYER"])) / 10 ** udec
             if have >= req["usd"]:
                 req_file.unlink()
                 continue
@@ -740,8 +743,10 @@ class Executor:
             fee = uint(self.call("0xeF4fB24aD0916217251F553c0596F8Edc630EB66",
                                  "globalFixedNativeFee()(uint88)"))
             try:
+                # giveAmount is USDG (home asset, 6dp); takeAmountMin is the
+                # destination USDC in ITS decimals (BSC 18, Base/Monad 6).
                 tx = self.send(self.dep["vault"], "fundDestination(uint256,uint256,uint256)",
-                               chain_id, int(amount * 1e6), int(amount * 0.97 * 1e6), value=str(fee))
+                               chain_id, int(amount * 1e6), int(amount * 0.97 * 10 ** udec), value=str(fee))
                 req["bridged_at"] = time.time()
                 req_file.write_text(json.dumps(req))
                 lib.append_jsonl(self.exec_log, {"ts": round(time.time(), 3), "kind": "satellite_fund",

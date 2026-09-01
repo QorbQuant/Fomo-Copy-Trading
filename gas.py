@@ -92,9 +92,10 @@ def refill_sol(cfg, gcfg, usdc_avail):
 DLN_ORDER_SOL_COST = 0.0175  # deBridge flat fee + order rent, in SOL
 
 
-def solana_dln_order(cfg, usd, dst_token, recipient):
+def solana_dln_order(cfg, usd, dst_token, recipient, dst_chain_id=4663):
     """Create+sign+send a deBridge order from the sleeve: USDC on Solana ->
-    dst_token on Robinhood Chain, delivered to `recipient`. Returns sig."""
+    dst_token on dst_chain_id (default Robinhood 4663), delivered to `recipient`.
+    dst_token 0x0 = native gas on that chain (BNB/MON/ETH). Returns sig."""
     pub = sleeve._env()["SLEEVE_SOLANA_PUBKEY"]
     # deBridge orders carry a real SOL cost — top up first if short
     if sleeve.sol_balance(cfg, pub) < DLN_ORDER_SOL_COST + 0.005:
@@ -105,7 +106,7 @@ def solana_dln_order(cfg, usd, dst_token, recipient):
     r = requests.get("https://dln.debridge.finance/v1.0/dln/order/create-tx", params={
         "srcChainId": 7565164, "srcChainTokenIn": sleeve.USDC_MINT,
         "srcChainTokenInAmount": int(usd * 1e6),
-        "dstChainId": 4663, "dstChainTokenOut": dst_token,
+        "dstChainId": dst_chain_id, "dstChainTokenOut": dst_token,
         "dstChainTokenOutRecipient": recipient,
         "srcChainOrderAuthorityAddress": pub,
         "dstChainOrderAuthorityAddress": keeper_addr(),
@@ -184,6 +185,48 @@ def refill_eth(cfg, gcfg, usdc_avail):
         return 0.0
 
 
+def refill_satellite_gas(cfg):
+    """Keep the keeper's NATIVE gas topped up on every LIVE satellite chain, so a
+    cross-chain trade never gets missed waiting for gas. Sourced from the sleeve
+    (Solana USDC) via a deBridge order delivering native token (0x0) to the
+    keeper — the same rail as the home-chain ETH refill, just a different
+    dstChainId. Proactive (not on-demand): gas is ready before the trade lands."""
+    gcfg = cfg.get("gas", {})
+    if not gcfg.get("auto_refill"):
+        return
+    keeper = keeper_addr()
+    for name, sat in cfg.get("satellites", {}).items():
+        if not sat.get("live"):
+            continue
+        try:
+            bal = int(lib.rpc(sat["rpc"], "eth_getBalance", [keeper, "latest"]), 16) / 1e18
+            native_px = lib.price_usd(sat["weth"].lower(), sat["dexscreener_chain_id"]) or 0
+        except Exception as e:
+            print(f"  [gas] {name} gas check failed: {str(e)[:80]}")
+            continue
+        if not native_px:
+            continue
+        target = sat.get("gas_target_usd", 2.0)
+        if bal * native_px >= target * 0.5:  # still over half a tank
+            continue
+        spent = _spent_today(cfg)
+        cap = gcfg.get("max_refill_usd_per_day", 60)
+        if spent >= cap:
+            return
+        usd = max(min(target - bal * native_px, cap - spent), 3)  # small; deBridge order floor
+        pub = sleeve._env()["SLEEVE_SOLANA_PUBKEY"]
+        usdc, _ = sleeve.token_balance(cfg, pub, sleeve.USDC_MINT)
+        if usdc - MIN_SLEEVE_USDC_FLOOR < usd:
+            print(f"  [gas] {name} native gas low ({bal:.5f}) but treasury can't cover ${usd:.2f}")
+            continue
+        try:
+            sig = solana_dln_order(cfg, usd, NATIVE_ETH, keeper, dst_chain_id=sat["chain_id"])
+            print(f"  [gas] {name} gas refill: ${usd:.2f} USDC -> native @ keeper ({sig[:16]}...)")
+            _log(cfg, {"kind": "satellite_gas", "chain": name, "usd": round(usd, 2), "sig": sig})
+        except Exception as e:
+            print(f"  [gas] {name} gas refill failed (deBridge may not support {name}?): {str(e)[:120]}")
+
+
 def maintain(cfg):
     """Called by the executor on its NAV cadence. Cheap when tanks are full."""
     gcfg = cfg.get("gas", {})
@@ -199,6 +242,11 @@ def maintain(cfg):
     spent1 = refill_sol(cfg, gcfg, min(usdc, budget + MIN_SLEEVE_USDC_FLOOR))
     usdc -= spent1
     refill_eth(cfg, gcfg, min(usdc, budget - spent1 + MIN_SLEEVE_USDC_FLOOR))
+    # keep live satellites' native gas ready so cross-chain trades aren't missed
+    try:
+        refill_satellite_gas(cfg)
+    except Exception as e:
+        print(f"  [gas] satellite gas maintenance failed: {str(e)[:100]}")
 
 
 def main():

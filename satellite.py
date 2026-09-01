@@ -42,6 +42,7 @@ class Satellite:
         self.dex = sat
         self.rpc = sat["rpc"]
         self.usdc = sat["usdc"]
+        self.usdc_dec = sat.get("usdc_decimals", 6)  # BSC's Binance-Peg USDC is 18, not 6
         self.weth = sat["weth"]
         self.slug = sat["dexscreener_chain_id"]
         d = lib.data_dir(self.cfg)
@@ -149,7 +150,7 @@ class Satellite:
             px = lib.price_usd(token, self.slug)
             if px:
                 total += bal * px
-        usdc = uint(self.call(self.usdc, "balanceOf(address)(uint256)", E["DEPLOYER"])) / 1e6
+        usdc = uint(self.call(self.usdc, "balanceOf(address)(uint256)", E["DEPLOYER"])) / 10**self.usdc_dec
         return total + usdc
 
     def execute(self, rec, nav, dry):
@@ -171,15 +172,19 @@ class Satellite:
             # JIT funding: if the keeper is short USDC on this chain, ask the
             # executor to bridge a chunk (it amortizes the bridge fee over many
             # trades) and defer this buy until the funds land.
-            have = uint(self.call(self.usdc, "balanceOf(address)(uint256)", E["DEPLOYER"])) / 1e6
+            have = uint(self.call(self.usdc, "balanceOf(address)(uint256)", E["DEPLOYER"])) / 10**self.usdc_dec
             if have < usd and not dry:
-                # request a chunk sized to serve a run of trades, not just this one
-                chunk = max(usd * 8, self.cfg["sleeve"].get("rotation_bridge_min_usd", 200))
+                # request a chunk sized to serve a run of trades, not just this one.
+                # test_mode drops the amortization floor so even tiny trades fund
+                # + fire (proving the cross-chain path; economics are ignored).
+                test = self.cfg.get("sleeve", {}).get("test_mode")
+                floor = 1 if test else self.cfg["sleeve"].get("rotation_bridge_min_usd", 200)
+                chunk = max(usd * 8, floor)
                 lib.request_satellite_funding(self.cfg, self.name, self.dex["chain_id"], chunk)
                 print(f"  [{self.name}] awaiting funding: need ${usd:.2f}, have ${have:.2f} "
                       f"(requested ${chunk:.0f} chunk)")
                 return
-            amount_in = int(usd * 1e6)
+            amount_in = int(usd * 10**self.usdc_dec)
             min_out = int(self.quote(tok["path_buy"], amount_in) * (1 - SLIPPAGE))
             action = f"buy ${usd:,.2f} {tok['symbol']} (minOut {min_out})"
             if not dry:
