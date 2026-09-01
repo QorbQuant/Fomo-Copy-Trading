@@ -6,6 +6,7 @@ Wants=network-online.target
 [Service]
 User=fomo
 WorkingDirectory=/home/fomo/fomo-copy-vault
+Environment=ALCHEMY_CHAINS=
 Environment=PATH=/home/fomo/.foundry/bin:/usr/local/bin:/usr/bin:/bin
 # Watch-only: writes paper copy records tagged with the chain. The executor
 # ignores every non-home-chain record, so nothing here spends funds.

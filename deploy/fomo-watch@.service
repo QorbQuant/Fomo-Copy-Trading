@@ -6,6 +6,7 @@ Wants=network-online.target
 [Service]
 User=fomo
 WorkingDirectory=/home/fomo/fomo-copy-vault
+Environment=ALCHEMY_CHAINS=
 Environment=PATH=/home/fomo/.foundry/bin:/usr/local/bin:/usr/bin:/bin
 # Instance name is "<trader>.<chain>", e.g. fomo-watch@frankdegods.robinhood.
 # Observation only: writes to trades_<trader>.jsonl / copy_trades_<trader>.jsonl,
