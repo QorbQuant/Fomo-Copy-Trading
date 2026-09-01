@@ -316,7 +316,33 @@ def token_meta(rpc_url, token):
 # ---------------------------------------------------------------- dexscreener prices
 
 _price_cache = {}  # token -> (ts, {"price":..., "liquidity":...})
+_price_last_good = {}  # token -> last successfully-fetched info (no TTL)
 PRICE_TTL = 20
+_last_dex_call = [0.0]
+
+
+def _dex_get(url):
+    """Paced + retried dexscreener GET. The VM's watchers and the dashboard all
+    share one IP, so 429s are routine — pace calls ~0.15s apart and back off on
+    failure instead of surfacing 'no price' (which callers treat as worthless)."""
+    for attempt in range(3):
+        wait = _last_dex_call[0] + 0.15 - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        _last_dex_call[0] = time.time()
+        try:
+            r = _session.get(url, timeout=20)
+            r.raise_for_status()
+            return r
+        except requests.RequestException as e:
+            if attempt == 2:
+                raise
+            resp = getattr(e, "response", None)
+            if resp is not None and resp.status_code == 429:
+                ra = resp.headers.get("Retry-After")
+                time.sleep(max(float(ra) if ra else 0, 2.0 * (attempt + 1)))
+            else:
+                time.sleep(1.0 * (attempt + 1))
 
 
 def token_price_info(token, chain_slug, fresh=False):
@@ -331,8 +357,7 @@ def token_price_info(token, chain_slug, fresh=False):
     info = {"price": None, "liquidity": 0.0, "symbol": None, "volume24h": 0.0,
             "buys24h": 0, "sells24h": 0}
     try:
-        r = _session.get(f"https://api.dexscreener.com/latest/dex/tokens/{token}", timeout=15)
-        r.raise_for_status()
+        r = _dex_get(f"https://api.dexscreener.com/latest/dex/tokens/{token}")
         pairs = [p for p in (r.json().get("pairs") or []) if p.get("chainId") == chain_slug]
         # aggregate sells across ALL pairs — a honeypot check must see the whole
         # token, not just its deepest pool
@@ -359,8 +384,15 @@ def token_price_info(token, chain_slug, fresh=False):
             info = {"price": best[1], "liquidity": best[0], "symbol": best[2],
                     "volume24h": best[3], "buys24h": buys24, "sells24h": sells24}
     except requests.RequestException:
-        pass
+        # NEVER cache a failure (a 429 would poison the token for the whole TTL
+        # — this once zeroed a $2.1M book position). Serve the last-known-good
+        # value instead of "no price": a slightly stale mark beats a zero for
+        # every caller (NAV, books, dashboards); on-chain minOuts come from
+        # QuoterV2, never from here.
+        return _price_last_good.get(key, info)
     _price_cache[key] = (now, info)
+    if info["price"] is not None:
+        _price_last_good[key] = info
     return info
 
 
@@ -377,9 +409,7 @@ def batch_price_info(tokens, chain_slug):
     for i in range(0, len(toks), 30):
         chunk = toks[i:i + 30]
         try:
-            r = _session.get("https://api.dexscreener.com/latest/dex/tokens/"
-                             + ",".join(chunk), timeout=20)
-            r.raise_for_status()
+            r = _dex_get("https://api.dexscreener.com/latest/dex/tokens/" + ",".join(chunk))
             pairs = [p for p in (r.json().get("pairs") or []) if p.get("chainId") == chain_slug]
         except (requests.RequestException, ValueError):
             continue
