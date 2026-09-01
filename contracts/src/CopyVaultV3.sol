@@ -70,6 +70,7 @@ contract CopyVaultV3 is MiniERC20 {
     uint256 public navUpdatedAt;
     uint256 public navTtl = 15 minutes;
     uint256 public maxNavDeviationBps; // 0 = bound disabled
+    uint256 public navPostCooldown;    // min seconds between keeper NAV posts (0 = off); anti-ratchet
 
     uint256 public maxTradeBps = 500;
     uint256 public withdrawDelay = 1 hours;
@@ -90,6 +91,13 @@ contract CopyVaultV3 is MiniERC20 {
     /// not total exposure.
     uint256 public maxDepositPerAddress;
     mapping(address => uint256) public depositedAssets;
+
+    /// Temporary global TVL ceiling (asset units; 0 = no cap). Bounds the size of
+    /// the whole honeypot during the un-audited beta. totalDeposited tracks live
+    /// principal across all addresses and stays equal to the sum of depositedAssets
+    /// while a cap is active. Owner sets it to 0 to lift.
+    uint256 public maxTotalDeposits;
+    uint256 public totalDeposited;
 
     // fees
     uint256 public depositFeeBps;  // <= 200 (2%): one-time entry fee
@@ -131,6 +139,8 @@ contract CopyVaultV3 is MiniERC20 {
     event MgmtFeeAccrued(uint256 feeShares, uint256 feeAssets);
     event GasSwept(uint256 usdgIn, uint256 ethOut);
     event MaxDepositPerAddressSet(uint256 cap);
+    event MaxTotalDepositsSet(uint256 cap);
+    event NavPostCooldownSet(uint256 cooldown);
     event OwnershipTransferStarted(address indexed newOwner);
     event OwnershipTransferred(address indexed newOwner);
 
@@ -236,6 +246,21 @@ contract CopyVaultV3 is MiniERC20 {
         emit MaxDepositPerAddressSet(cap);
     }
 
+    /// Temporary beta global TVL ceiling (asset units). 0 lifts the cap.
+    function setMaxTotalDeposits(uint256 cap) external onlyOwner {
+        maxTotalDeposits = cap;
+        emit MaxTotalDepositsSet(cap);
+    }
+
+    /// Minimum seconds between keeper NAV posts (0 = off). Kept well under navTtl
+    /// so freshness isn't bricked; blocks a compromised keeper from ratcheting NAV
+    /// across many posts in quick succession. postNavOverride is not subject to it.
+    function setNavPostCooldown(uint256 cooldown) external onlyOwner {
+        require(cooldown <= 15 minutes, "cooldown");
+        navPostCooldown = cooldown;
+        emit NavPostCooldownSet(cooldown);
+    }
+
     /// Eject a token from the redemption payout set even while the vault still
     /// holds a nonzero balance of it. Escape hatch for a held token that has
     /// turned hostile (pausable/blacklisting/reverting) so it can no longer
@@ -312,6 +337,10 @@ contract CopyVaultV3 is MiniERC20 {
 
     function postNav(uint256 total, uint256 away) external onlyExecutor {
         require(away <= total, "away>total");
+        // Space out posts, but never block the very first one (navUpdatedAt == 0).
+        if (navPostCooldown > 0 && navUpdatedAt != 0) {
+            require(block.timestamp >= navUpdatedAt + navPostCooldown, "nav cooldown");
+        }
         _checkNavBounds(total);
         totalNavAsset = total;
         awayNav = away;
@@ -515,10 +544,13 @@ contract CopyVaultV3 is MiniERC20 {
         returns (uint256 shares)
     {
         require(assets > 0, "zero");
-        if (maxDepositPerAddress > 0) {
+        if (maxDepositPerAddress > 0 || maxTotalDeposits > 0) {
             uint256 principal = depositedAssets[msg.sender] + assets;
-            require(principal <= maxDepositPerAddress, "deposit cap");
+            if (maxDepositPerAddress > 0) require(principal <= maxDepositPerAddress, "deposit cap");
             depositedAssets[msg.sender] = principal;
+            uint256 tvl = totalDeposited + assets;
+            if (maxTotalDeposits > 0) require(tvl <= maxTotalDeposits, "tvl cap");
+            totalDeposited = tvl;
         }
         require(asset.transferFrom(msg.sender, address(this), assets), "transfer");
 
@@ -584,12 +616,13 @@ contract CopyVaultV3 is MiniERC20 {
         }
 
         // Release tracked deposit principal in proportion to the shares burned, so
-        // an address that exits frees up room under the per-address cap.
-        if (maxDepositPerAddress > 0) {
+        // an address that exits frees up room under the per-address and TVL caps.
+        if (maxDepositPerAddress > 0 || maxTotalDeposits > 0) {
             uint256 tracked = depositedAssets[msg.sender];
             if (tracked > 0) {
                 uint256 reduce = tracked * sharesToBurn / balanceOf[msg.sender]; // pre-burn balance
-                depositedAssets[msg.sender] = tracked > reduce ? tracked - reduce : 0;
+                depositedAssets[msg.sender] = tracked - reduce; // reduce <= tracked
+                totalDeposited = totalDeposited > reduce ? totalDeposited - reduce : 0;
             }
         }
         _burn(msg.sender, sharesToBurn);

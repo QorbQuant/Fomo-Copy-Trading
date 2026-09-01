@@ -263,6 +263,73 @@ contract CopyVaultV3HardeningTest is Test {
         assertEq(vault.balanceOf(alice), 10_000e18);
     }
 
+    // ---- global TVL cap ----
+
+    function test_tvlCapEnforcedAcrossAddresses() public {
+        vault.setMaxTotalDeposits(1_500e6); // whole-vault ceiling
+        vm.prank(alice);
+        vault.deposit(1_000e6, 0);
+        vm.prank(keeper);
+        vault.postNav(1_000e6, 0);
+        // bob's deposit that would push total over the ceiling reverts
+        vm.prank(bob);
+        vm.expectRevert(bytes("tvl cap"));
+        vault.deposit(600e6, 0);
+        // ...up to the ceiling is fine
+        vm.prank(bob);
+        vault.deposit(500e6, 0);
+        assertEq(vault.totalDeposited(), 1_500e6);
+    }
+
+    function test_tvlCapFreedByRedeem() public {
+        vault.setMaxTotalDeposits(1_000e6);
+        vm.prank(alice);
+        vault.deposit(1_000e6, 0); // at the ceiling
+        vm.prank(keeper);
+        vault.postNav(1_000e6, 0);
+        vm.warp(block.timestamp + vault.withdrawDelay() + 1);
+
+        uint256 aliceShares = vault.balanceOf(alice);
+        vm.prank(alice);
+        vault.redeemInKind(aliceShares, alice);
+        assertEq(vault.totalDeposited(), 0); // ceiling freed
+
+        vm.prank(bob);
+        vault.deposit(1_000e6, 0); // now bob can fill it
+        assertEq(vault.totalDeposited(), 1_000e6);
+    }
+
+    // ---- NAV-post cooldown (anti-ratchet) ----
+
+    function test_navPostCooldownBlocksRapidReposts() public {
+        vault.setNavPostCooldown(2 minutes);
+        seed(1_000e6); // seed() posts NAV once
+        // an immediate second post is rejected
+        vm.prank(keeper);
+        vm.expectRevert(bytes("nav cooldown"));
+        vault.postNav(900e6, 0);
+        // after the cooldown it goes through
+        vm.warp(block.timestamp + 2 minutes);
+        vm.prank(keeper);
+        vault.postNav(900e6, 0);
+        assertEq(vault.totalNavAsset(), 900e6);
+    }
+
+    function test_navPostOverrideBypassesCooldown() public {
+        vault.setNavPostCooldown(2 minutes);
+        seed(1_000e6);
+        // owner escape hatch is not subject to the cooldown
+        vault.postNavOverride(800e6, 0);
+        assertEq(vault.totalNavAsset(), 800e6);
+    }
+
+    function test_navPostCooldownCapEnforced() public {
+        vm.expectRevert(bytes("cooldown"));
+        vault.setNavPostCooldown(16 minutes); // must stay under the freshness window
+        vault.setNavPostCooldown(15 minutes); // at the ceiling ok
+        assertEq(vault.navPostCooldown(), 15 minutes);
+    }
+
     // ---- M-01: gas-sweep cooldown cannot be set to zero ----
 
     function test_gasSweepCooldownFloor() public {
