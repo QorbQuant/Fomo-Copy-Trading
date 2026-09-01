@@ -70,10 +70,35 @@ contract CopyVaultV3 is MiniERC20 {
     uint256 public navUpdatedAt;
     uint256 public navTtl = 15 minutes;
     uint256 public maxNavDeviationBps; // 0 = bound disabled
+    uint256 public navPostCooldown;    // min seconds between keeper NAV posts (0 = off); anti-ratchet
 
     uint256 public maxTradeBps = 500;
     uint256 public withdrawDelay = 1 hours;
     mapping(address => uint256) public lastDepositAt;
+
+    /// Minimum value a cross-chain funding order must promise to deliver, as bps
+    /// of the amount given away. Blocks a leaked keeper from posting takeAmountMin
+    /// ~0 and letting a taker fill the DLN order for nothing. Assumes give/take
+    /// tokens share decimals (true for the USDC/USDG family used here).
+    uint256 public minReturnBps = 9000;
+
+    /// Temporary per-address deposit cap (asset units; 0 = no cap). A training
+    /// wheel for the un-audited beta: bounds how much any single address can put
+    /// at risk. depositedAssets tracks live principal per address — it grows on
+    /// deposit and shrinks pro-rata on redeem, so an address that fully exits can
+    /// deposit again. Owner sets it to 0 to lift the cap once audited. Not sybil-
+    /// proof (deposits can be split across addresses); it caps per-address size,
+    /// not total exposure.
+    uint256 public maxDepositPerAddress;
+    mapping(address => uint256) public depositedAssets;
+
+    /// Temporary global TVL ceiling (asset units; 0 = no cap). Bounds the size of
+    /// the whole honeypot during the un-audited beta. Checked in REAL TIME at
+    /// deposit against live NAV (totalNavAsset), NOT a running deposit counter — a
+    /// counter never migrates when shares are transferred, so
+    /// deposit -> transfer -> redeem-elsewhere would ratchet it up permanently and
+    /// brick all future deposits. Owner sets it to 0 to lift.
+    uint256 public maxTotalDeposits;
 
     // fees
     uint256 public depositFeeBps;  // <= 200 (2%): one-time entry fee
@@ -114,6 +139,9 @@ contract CopyVaultV3 is MiniERC20 {
     event PerfFeeCrystallized(uint256 feeShares, uint256 feeAssets);
     event MgmtFeeAccrued(uint256 feeShares, uint256 feeAssets);
     event GasSwept(uint256 usdgIn, uint256 ethOut);
+    event MaxDepositPerAddressSet(uint256 cap);
+    event MaxTotalDepositsSet(uint256 cap);
+    event NavPostCooldownSet(uint256 cooldown);
     event OwnershipTransferStarted(address indexed newOwner);
     event OwnershipTransferred(address indexed newOwner);
 
@@ -208,6 +236,40 @@ contract CopyVaultV3 is MiniERC20 {
         allowedTokens[token] = allowed;
     }
 
+    function setMinReturnBps(uint256 bps) external onlyOwner {
+        require(bps <= 10_000, "bps");
+        minReturnBps = bps;
+    }
+
+    /// Temporary beta deposit cap per address (asset units). 0 lifts the cap.
+    function setMaxDepositPerAddress(uint256 cap) external onlyOwner {
+        maxDepositPerAddress = cap;
+        emit MaxDepositPerAddressSet(cap);
+    }
+
+    /// Temporary beta global TVL ceiling (asset units). 0 lifts the cap.
+    function setMaxTotalDeposits(uint256 cap) external onlyOwner {
+        maxTotalDeposits = cap;
+        emit MaxTotalDepositsSet(cap);
+    }
+
+    /// Minimum seconds between keeper NAV posts (0 = off). Kept well under navTtl
+    /// so freshness isn't bricked; blocks a compromised keeper from ratcheting NAV
+    /// across many posts in quick succession. postNavOverride is not subject to it.
+    function setNavPostCooldown(uint256 cooldown) external onlyOwner {
+        require(cooldown <= 15 minutes, "cooldown");
+        navPostCooldown = cooldown;
+        emit NavPostCooldownSet(cooldown);
+    }
+
+    /// Eject a token from the redemption payout set even while the vault still
+    /// holds a nonzero balance of it. Escape hatch for a held token that has
+    /// turned hostile (pausable/blacklisting/reverting) so it can no longer
+    /// block every redeemer; the keeper simply stops marking it in NAV.
+    function quarantineHeldToken(address token) external onlyOwner {
+        _dropHeld(token);
+    }
+
     function setParams(uint256 maxTradeBps_, uint256 withdrawDelay_, uint256 navTtl_) external onlyOwner {
         require(maxTradeBps_ <= 10_000, "bps");
         require(withdrawDelay_ <= MAX_WITHDRAW_DELAY, "delay");
@@ -234,7 +296,8 @@ contract CopyVaultV3 is MiniERC20 {
     }
 
     function setGasSweep(uint256 maxGasSweepBps_, uint256 cooldown_) external onlyOwner {
-        require(maxGasSweepBps_ <= 100, "bps"); // hard ceiling 1% of NAV per sweep
+        require(maxGasSweepBps_ <= 100, "bps");        // hard ceiling 1% of NAV per sweep
+        require(cooldown_ >= 15 minutes, "cooldown");  // floor so the sweep can't be looped in one block
         maxGasSweepBps = maxGasSweepBps_;
         gasSweepCooldown = cooldown_;
     }
@@ -275,6 +338,10 @@ contract CopyVaultV3 is MiniERC20 {
 
     function postNav(uint256 total, uint256 away) external onlyExecutor {
         require(away <= total, "away>total");
+        // Space out posts, but never block the very first one (navUpdatedAt == 0).
+        if (navPostCooldown > 0 && navUpdatedAt != 0) {
+            require(block.timestamp >= navUpdatedAt + navPostCooldown, "nav cooldown");
+        }
         _checkNavBounds(total);
         totalNavAsset = total;
         awayNav = away;
@@ -307,10 +374,13 @@ contract CopyVaultV3 is MiniERC20 {
         returns (uint256 amountOut)
     {
         require(tokenIn != tokenOut, "same token");
+        require(minOut > 0, "minOut"); // no blind swaps: force the keeper to state a floor
         if (tokenIn == address(asset)) {
             if (!allowedTokens[tokenOut]) revert TokenNotAllowed(tokenOut);
             if (_navStale()) revert StaleNav();
-            if (amountIn > totalNavAsset * maxTradeBps / 10_000) revert TradeTooLarge();
+            // Cap against the real USDG balance, not keeper-posted NAV, so the
+            // executor can't lift its own trade ceiling by posting a large NAV.
+            if (amountIn > asset.balanceOf(address(this)) * maxTradeBps / 10_000) revert TradeTooLarge();
         } else if (tokenOut == address(asset)) {
             if (heldIndex[tokenIn] == 0) revert TokenNotAllowed(tokenIn);
         } else {
@@ -346,6 +416,9 @@ contract CopyVaultV3 is MiniERC20 {
         if (!dd.set) revert DestNotConfigured();
         if (_navStale()) revert StaleNav();
         if (dd.fundedAsset + amount > totalNavAsset * dd.capBps / 10_000) revert DestCapExceeded();
+        // The order must promise to deliver at least minReturnBps of what it gives
+        // away, so a leaked keeper can't create a ~free giveaway for a taker.
+        require(takeAmountMin >= amount * minReturnBps / 10_000, "return floor");
         dd.fundedAsset += amount;
 
         asset.approve(address(dlnSource), amount);
@@ -373,6 +446,10 @@ contract CopyVaultV3 is MiniERC20 {
     function noteDestinationReturn(uint256 chainId, uint256 amount) external onlyExecutor {
         Destination storage dd = dest[chainId];
         dd.fundedAsset = amount >= dd.fundedAsset ? 0 : dd.fundedAsset - amount;
+        // Repatriated capital is home again: shrink awayNav in step so hNav tracks
+        // the returned balance immediately, closing the window where a redeemer
+        // could take the (now higher) home balance while too few shares burn.
+        awayNav = amount >= awayNav ? 0 : awayNav - amount;
         emit DestinationReturned(chainId, amount);
     }
 
@@ -406,6 +483,35 @@ contract CopyVaultV3 is MiniERC20 {
 
     receive() external payable {}
 
+    /// Recover stray ETH or a token that was sent to the vault outside the trade
+    /// path. Restricted so it can never touch managed funds: not the asset, and
+    /// not anything currently in the redemption payout set.
+    function rescue(address token, address to) external onlyOwner {
+        require(to != address(0), "to");
+        if (token == address(0)) {
+            (bool ok,) = to.call{value: address(this).balance}("");
+            require(ok, "eth");
+        } else {
+            require(token != address(asset) && heldIndex[token] == 0, "managed");
+            require(IERC20(token).transfer(to, IERC20(token).balanceOf(address(this))), "rescue");
+        }
+    }
+
+    /// Make the redemption withdraw-delay follow the shares: any address that
+    /// receives shares (mint or transfer) starts its own delay, so the lock can't
+    /// be dodged by minting at a stale NAV and moving the shares to a fresh key.
+    function _afterTokenTransfer(address from, address to, uint256 amount) internal override {
+        // Follow the withdraw-delay to a FRESH recipient (closes the "mint at a
+        // stale NAV, move shares to a new key" dodge) but NEVER let a dust transfer
+        // re-arm an EXISTING holder's clock — that would let anyone grief-lock a
+        // victim's redemption at ~1 wei/interval. Deposits arm their own lock in
+        // deposit(); mints skip this. Post-update, balanceOf[to] == amount iff `to`
+        // was previously empty.
+        if (from != address(0) && amount > 0 && balanceOf[to] == amount) {
+            lastDepositAt[to] = block.timestamp;
+        }
+    }
+
     // -------- sleeve* wrappers (backward compat: Solana destination) --------
 
     function setSleeve(IDlnSource dln, bytes calldata receiver, bytes calldata takeToken, uint256 capBps)
@@ -434,6 +540,7 @@ contract CopyVaultV3 is MiniERC20 {
     function noteSleeveReturn(uint256 amount) external onlyExecutor {
         Destination storage dd = dest[SOLANA];
         dd.fundedAsset = amount >= dd.fundedAsset ? 0 : dd.fundedAsset - amount;
+        awayNav = amount >= awayNav ? 0 : awayNav - amount; // keep hNav in step (see noteDestinationReturn)
         emit DestinationReturned(SOLANA, amount);
     }
 
@@ -446,6 +553,16 @@ contract CopyVaultV3 is MiniERC20 {
         returns (uint256 shares)
     {
         require(assets > 0, "zero");
+        if (maxDepositPerAddress > 0) {
+            uint256 principal = depositedAssets[msg.sender] + assets;
+            require(principal <= maxDepositPerAddress, "deposit cap");
+            depositedAssets[msg.sender] = principal;
+        }
+        // Real-time TVL check: live NAV plus this deposit must fit under the cap.
+        // No running counter (would strand on transfer+redeem and brick deposits).
+        if (maxTotalDeposits > 0) {
+            require(totalNavAsset + assets <= maxTotalDeposits, "tvl cap");
+        }
         require(asset.transferFrom(msg.sender, address(this), assets), "transfer");
 
         uint256 fee = assets * depositFeeBps / 10_000;
@@ -465,7 +582,12 @@ contract CopyVaultV3 is MiniERC20 {
             if (_navStale()) revert StaleNav();
             require(totalNavAsset > 0, "nav zero");
             _accrueFees(); // charge accrued AUM + perf fees before new money enters
-            shares = net * totalSupply / totalNavAsset;
+            // Floor the pricing denominator at the real pre-deposit USDG on hand.
+            // A manipulated low NAV can then never mint more shares than the vault
+            // is actually backed by, since the denominator can't drop below cash.
+            uint256 preUsdg = asset.balanceOf(address(this)) - net;
+            uint256 denom = totalNavAsset > preUsdg ? totalNavAsset : preUsdg;
+            shares = net * totalSupply / denom;
             totalNavAsset += net;
             _mint(msg.sender, shares);
         }
@@ -487,23 +609,57 @@ contract CopyVaultV3 is MiniERC20 {
         uint256 supplyBefore = totalSupply;
         uint256 nav = totalNavAsset;
         uint256 hNav = nav > awayNav ? nav - awayNav : 0;
-        require(hNav > 0, "no home liquidity");
 
-        uint256 sharesToBurn = nav > 0 ? shares * hNav / nav : shares;
-        require(sharesToBurn > 0, "dust");
+        uint256 sharesToBurn;
+        if (hNav > 0) {
+            // Away-aware path: burn only the home-backed fraction and mark out
+            // exactly the home value paid; the away fraction stays as shares the
+            // redeemer keeps and redeems once that capital is repatriated.
+            sharesToBurn = shares * hNav / nav;
+            require(sharesToBurn > 0, "dust");
+            totalNavAsset = nav - hNav * shares / supplyBefore;
+        } else {
+            // Degenerate: the posted split says nothing is home. Never brick the
+            // exit — fall back to a full-share burn against whatever is actually
+            // on hand, so a bad NAV post can't trap funds.
+            sharesToBurn = shares;
+            totalNavAsset = nav > 0 ? nav - nav * shares / supplyBefore : 0;
+        }
 
-        // mark out exactly the home value being paid; away stays put
-        totalNavAsset = nav - hNav * shares / supplyBefore;
+        // Release this address's tracked deposit principal in proportion to the
+        // shares burned, so a full exit frees its room under maxDepositPerAddress.
+        // (The global cap is real-time NAV-based, so nothing to release there.)
+        uint256 tracked = depositedAssets[msg.sender];
+        if (tracked > 0) {
+            uint256 reduce = tracked * sharesToBurn / balanceOf[msg.sender]; // pre-burn balance
+            depositedAssets[msg.sender] = tracked - reduce; // reduce <= tracked
+        }
         _burn(msg.sender, sharesToBurn);
 
         uint256 assetSlice = asset.balanceOf(address(this)) * shares / supplyBefore;
         if (assetSlice > 0) require(asset.transfer(receiver, assetSlice), "transfer");
 
+        // Pay each held token best-effort. A single hostile token (paused,
+        // blacklisting, reverting, no-return) is skipped rather than reverting the
+        // whole redemption; its slice stays in the vault, claimable after the owner
+        // quarantines it or it recovers. Redemption can never be bricked by a token.
         for (uint256 i = heldTokens.length; i > 0; i--) {
-            IERC20 token = IERC20(heldTokens[i - 1]);
-            uint256 slice = token.balanceOf(address(this)) * shares / supplyBefore;
-            if (slice > 0) require(token.transfer(receiver, slice), "transfer");
-            if (token.balanceOf(address(this)) == 0) _dropHeld(address(token));
+            address token = heldTokens[i - 1];
+            uint256 bal;
+            try IERC20(token).balanceOf(address(this)) returns (uint256 b) {
+                bal = b;
+            } catch {
+                continue;
+            }
+            uint256 slice = bal * shares / supplyBefore;
+            if (slice > 0) {
+                try IERC20(token).transfer(receiver, slice) returns (bool ok) {
+                    if (!ok) continue;
+                } catch {
+                    continue;
+                }
+            }
+            if (bal - slice == 0) _dropHeld(token);
         }
         emit RedeemInKind(msg.sender, receiver, shares, sharesToBurn);
     }

@@ -39,6 +39,49 @@ contract MockDlnSource is IDlnSource {
     }
 }
 
+/// A token that can be flipped hostile: once toggled, transfer/transferFrom
+/// revert (models a paused / blacklisting / honeypot memecoin). Used to prove a
+/// single bad held token cannot brick every redeemer.
+contract HostileERC20 {
+    string public name = "Hostile";
+    string public symbol = "EVIL";
+    uint8 public decimals = 18;
+    uint256 public totalSupply;
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+    bool public hostile;
+
+    function setHostile(bool h) external {
+        hostile = h;
+    }
+
+    function mint(address to, uint256 amt) external {
+        totalSupply += amt;
+        balanceOf[to] += amt;
+    }
+
+    function approve(address s, uint256 a) external returns (bool) {
+        allowance[msg.sender][s] = a;
+        return true;
+    }
+
+    function transfer(address to, uint256 amt) external returns (bool) {
+        require(!hostile, "blocked");
+        balanceOf[msg.sender] -= amt;
+        balanceOf[to] += amt;
+        return true;
+    }
+
+    function transferFrom(address f, address t, uint256 amt) external returns (bool) {
+        require(!hostile, "blocked");
+        uint256 al = allowance[f][msg.sender];
+        if (al != type(uint256).max) allowance[f][msg.sender] = al - amt;
+        balanceOf[f] -= amt;
+        balanceOf[t] += amt;
+        return true;
+    }
+}
+
 /// Fixed-rate mock DEX: pays out amountIn * rate / 1e18 of tokenOut from its
 /// own reserves. Rates are set per (tokenIn, tokenOut) pair.
 contract MockRouter is ICopyRouter {

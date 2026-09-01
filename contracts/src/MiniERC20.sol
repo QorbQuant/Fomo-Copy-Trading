@@ -40,6 +40,7 @@ contract MiniERC20 {
             balanceOf[to] += amount;
         }
         emit Transfer(msg.sender, to, amount);
+        _afterTokenTransfer(msg.sender, to, amount);
         return true;
     }
 
@@ -51,6 +52,7 @@ contract MiniERC20 {
             balanceOf[to] += amount;
         }
         emit Transfer(from, to, amount);
+        _afterTokenTransfer(from, to, amount);
         return true;
     }
 
@@ -60,7 +62,13 @@ contract MiniERC20 {
             balanceOf[to] += amount;
         }
         emit Transfer(address(0), to, amount);
+        _afterTokenTransfer(address(0), to, amount);
     }
+
+    /// Hook run after every balance-increasing movement (mint + transfers).
+    /// Overridden by the vault to make the redemption withdraw-delay follow the
+    /// shares, so it can't be dodged by moving shares to a fresh address.
+    function _afterTokenTransfer(address from, address to, uint256 amount) internal virtual {}
 
     function _burn(address from, uint256 amount) internal {
         balanceOf[from] -= amount;

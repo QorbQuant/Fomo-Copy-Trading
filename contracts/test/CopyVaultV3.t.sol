@@ -60,7 +60,7 @@ contract CopyVaultV3Test is Test {
     function test_depositMirrorRedeemParity() public {
         seed(1_000e6);
         vm.prank(keeper);
-        vault.mirrorTrade(address(usdc), address(meme), 50e6, 0);
+        vault.mirrorTrade(address(usdc), address(meme), 50e6, 40e18);
         assertEq(meme.balanceOf(address(vault)), 50e18);
         vm.warp(block.timestamp + vault.withdrawDelay() + 1);
         uint256 sh = vault.balanceOf(alice);
@@ -225,7 +225,7 @@ contract CopyVaultV3Test is Test {
         vm.deal(keeper, 1 ether);
         uint256 fee = dln.FEE(); // hoist: a view call here would consume the prank
         vm.prank(keeper);
-        vault.fundDestination{value: fee}(BASE, 600e6, 0);
+        vault.fundDestination{value: fee}(BASE, 600e6, 560e6); // >= 90% return floor
         assertEq(usdc.balanceOf(address(vault)), 1_400e6); // home holdings
         vm.prank(keeper);
         vault.postNav(2_000e6, 600e6); // total unchanged, 600 now marked away
@@ -249,14 +249,23 @@ contract CopyVaultV3Test is Test {
         assertEq(vault.balanceOf(bob), 1_000e18);
     }
 
-    function test_redeemRevertsWhenAllAway() public {
+    function test_redeemAllAwayFallsBackToFullBurn() public {
+        // A bad/hostile NAV post marks everything "away" while real USDG is still
+        // on hand. Redemption must NOT brick — it falls back to a full-share burn
+        // against the real balance so funds can never be trapped.
         seed(1_000e6);
         vm.prank(keeper);
-        vault.postNav(1_000e6, 1_000e6); // everything away, nothing home
+        vault.postNav(1_000e6, 1_000e6); // everything marked away, nothing "home"
         vm.warp(block.timestamp + vault.withdrawDelay() + 1);
+
+        uint256 supplyBefore = vault.totalSupply();
         vm.prank(alice);
-        vm.expectRevert(bytes("no home liquidity"));
-        vault.redeemInKind(100e18, alice);
+        vault.redeemInKind(100e18, alice); // succeeds instead of reverting
+
+        // 100/1000 of the real 1,000 USDG paid out; full 100e18 shares burned
+        assertEq(usdc.balanceOf(alice), 999_000e6 + 100e6);
+        assertEq(vault.balanceOf(alice), 900e18);
+        assertEq(vault.totalSupply(), supplyBefore - 100e18);
     }
 
     // ---- pause / guardian ----
