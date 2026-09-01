@@ -21,6 +21,46 @@ from sync import fetch_trader_portfolio
 SOL_MINT = "So11111111111111111111111111111111111111112"
 
 
+def watchlist_book(cfg, key):
+    """A watchlist trader's real holdings, fast enough for the 30-min refresh:
+    EVM side via the hardened AJC book fetcher (bounded candidate set); Solana
+    side priced in BATCH (a whale wallet has hundreds of non-zero ATAs — one
+    dexscreener call each would take minutes)."""
+    wcfg = dict(cfg)
+    wcfg["trader"] = cfg["traders"][key]
+    positions, cash, _, _ = fetch_trader_portfolio(wcfg, include_solana=False)
+
+    sol_addr = cfg["traders"][key].get("solana_address")
+    if sol_addr:
+        amounts = {}
+        for program in sleeve.TOKEN_PROGRAMS:
+            res = lib.rpc(cfg["solana"]["rpc"], "getTokenAccountsByOwner",
+                          [sol_addr, {"programId": program}, {"encoding": "jsonParsed"}])
+            for v in (res or {}).get("value", []):
+                info = v["account"]["data"]["parsed"]["info"]
+                amt = float(info["tokenAmount"]["uiAmount"] or 0)
+                if amt > 0:
+                    amounts[info["mint"]] = amounts.get(info["mint"], 0) + amt
+        usdc = amounts.pop(sleeve.USDC_MINT, 0)
+        cash += usdc
+        prices = lib.batch_price_info(list(amounts), "solana")
+        for mint, amt in amounts.items():
+            p = prices.get(mint)
+            if not p or not p["price"]:
+                continue
+            usd = amt * p["price"]
+            if p["liquidity"] < 25_000 or usd > p["liquidity"] * 3:
+                continue  # same anti-poisoning posture as the main book
+            positions.append({"addr": mint, "symbol": p["symbol"] or mint[:6],
+                              "usd": usd, "price": p["price"], "chain": "solana"})
+        cash += sleeve.sol_balance(cfg, sol_addr) * (
+            lib.price_usd(SOL_MINT, "solana") or 0)
+
+    positions.sort(key=lambda p: -p["usd"])
+    total = cash + sum(p["usd"] for p in positions)
+    return {"positions": positions[:8], "cash": cash, "total": total}
+
+
 def gather(cfg):
     ex = Executor(mainnet=True)
     V = ex.dep["vault"]
@@ -115,13 +155,7 @@ def gather(cfg):
     sims = sim_mod.simulate_all(cfg)
     for s in sims:
         try:
-            # same book fetcher as AJC (incl. anti-poisoning + trusted-token
-            # hardening), pointed at the watchlist trader's addresses
-            wcfg = dict(cfg)
-            wcfg["trader"] = cfg["traders"][s["key"]]
-            wpos, wcash, wtotal, _ = fetch_trader_portfolio(wcfg)
-            s["book"] = {"positions": sorted(wpos, key=lambda p: -p["usd"])[:8],
-                         "cash": wcash, "total": wtotal}
+            s["book"] = watchlist_book(cfg, s["key"])
         except Exception as e:
             print(f"  [dash warn] {s['key']} book fetch failed: {str(e)[:100]}")
             s["book"] = None

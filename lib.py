@@ -368,6 +368,36 @@ def _addr_eq(a, b):
     return a.lower() == b.lower() if b.startswith("0x") else a == b
 
 
+def batch_price_info(tokens, chain_slug):
+    """Price many tokens in few calls: dexscreener's tokens endpoint accepts up
+    to 30 comma-joined addresses. -> {token: {price, liquidity, symbol}} (input
+    casing preserved; missing/unpriced tokens absent)."""
+    out = {}
+    toks = list(tokens)
+    for i in range(0, len(toks), 30):
+        chunk = toks[i:i + 30]
+        try:
+            r = _session.get("https://api.dexscreener.com/latest/dex/tokens/"
+                             + ",".join(chunk), timeout=20)
+            r.raise_for_status()
+            pairs = [p for p in (r.json().get("pairs") or []) if p.get("chainId") == chain_slug]
+        except (requests.RequestException, ValueError):
+            continue
+        want = {t.lower(): t for t in chunk}
+        best = {}  # lower_addr -> (liq, price, symbol)
+        for p in pairs:
+            liq = (p.get("liquidity") or {}).get("usd") or 0
+            base = p.get("baseToken", {})
+            addr = (base.get("address") or "").lower()
+            if addr in want and p.get("priceUsd"):
+                if addr not in best or liq > best[addr][0]:
+                    best[addr] = (liq, float(p["priceUsd"]), base.get("symbol"))
+        for low, (liq, px, sym) in best.items():
+            out[want[low]] = {"price": px, "liquidity": liq, "symbol": sym}
+        time.sleep(0.3)  # stay polite across chunks
+    return out
+
+
 def price_usd(token, chain_slug):
     return token_price_info(token, chain_slug)["price"]
 

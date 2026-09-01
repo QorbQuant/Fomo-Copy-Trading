@@ -75,7 +75,7 @@ def _erc20_balance(rpc_url, token, holder, decimals):
         return 0.0
 
 
-def fetch_trader_portfolio(cfg):
+def fetch_trader_portfolio(cfg, include_solana=True):
     """-> (positions [{addr, symbol, usd, price}], cash_usd, total_usd, excluded)
 
     Robinhood holdings are read via on-chain balanceOf over a candidate set
@@ -144,7 +144,12 @@ def fetch_trader_portfolio(cfg):
         positions.append({"addr": taddr, "symbol": symbol, "usd": usd, "price": info["price"],
                           "chain": "robinhood"})
 
-    # Solana side of the book: same anti-poisoning filters
+    # Solana side of the book: same anti-poisoning filters. Skippable for
+    # callers that price the Solana side in batch (watchlist books — a whale
+    # wallet's hundreds of ATAs at one dexscreener call each is minutes).
+    if not include_solana:
+        total = cash + sum(p["usd"] for p in positions)
+        return positions, cash, total, excluded
     sol_addr = cfg["trader"]["solana_address"]
     for program in sleeve_mod.TOKEN_PROGRAMS:
         res = lib.rpc(cfg["solana"]["rpc"], "getTokenAccountsByOwner",
