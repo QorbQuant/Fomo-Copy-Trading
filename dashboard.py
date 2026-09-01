@@ -54,9 +54,10 @@ def gather(cfg):
         vnav += usd
         vpos.append({"addr": a.lower(), "symbol": info["symbol"] or a[:8], "usd": usd,
                      "chain": "robinhood"})
-    # solana sleeve
+    # solana sleeve — itemized so the dashboard shows WHAT is in it, not a lump
     pub = sleeve._env().get("SLEEVE_SOLANA_PUBKEY")
-    sleeve_usd = sleeve.sleeve_value_usd(cfg, pub) if pub else 0
+    sleeve_items = sleeve.sleeve_holdings(cfg, pub) if pub else []
+    sleeve_usd = sum(h["usd"] for h in sleeve_items)
     vnav += sleeve_usd
     vnet = {"robinhood": vnav - usdg - sleeve_usd + usdg, "solana": sleeve_usd}
     vnet = {"robinhood": (vnav - sleeve_usd), "solana": sleeve_usd}
@@ -109,14 +110,27 @@ def gather(cfg):
     trades = list(reversed(trades))
     execs = list(reversed(lib.read_jsonl(d / "executions_mainnet.jsonl")))[:16]
 
-    # ---- watchlist trader simulations (paper vaults) ----
+    # ---- watchlist trader simulations (paper vaults) + their REAL holdings ----
     import simulate as sim_mod
     sims = sim_mod.simulate_all(cfg)
+    for s in sims:
+        try:
+            # same book fetcher as AJC (incl. anti-poisoning + trusted-token
+            # hardening), pointed at the watchlist trader's addresses
+            wcfg = dict(cfg)
+            wcfg["trader"] = cfg["traders"][s["key"]]
+            wpos, wcash, wtotal, _ = fetch_trader_portfolio(wcfg)
+            s["book"] = {"positions": sorted(wpos, key=lambda p: -p["usd"])[:8],
+                         "cash": wcash, "total": wtotal}
+        except Exception as e:
+            print(f"  [dash warn] {s['key']} book fetch failed: {str(e)[:100]}")
+            s["book"] = None
 
     return {
         "ts": time.time(),
         "trader": trader,
-        "vault": {"nav": vnav, "cash": usdg, "sleeve": sleeve_usd, "positions": vpos,
+        "vault": {"nav": vnav, "cash": usdg, "sleeve": sleeve_usd,
+                  "sleeve_items": sleeve_items, "positions": vpos,
                   "networks": vnet, "address": V},
         "compare": {"rows": rows, "coverage": coverage},
         "pnl": pnl,
@@ -178,6 +192,25 @@ def nav_svg(series, aum, w=560, h=110):
     </svg>'''
 
 
+def _book_rows(book):
+    """The watchlist trader's REAL current holdings (their fomo book)."""
+    if not book:
+        return '<div class="simempty">holdings unavailable this refresh</div>'
+    rows = ""
+    for p in book["positions"]:
+        w = p["usd"] / book["total"] * 100 if book["total"] else 0
+        rows += (f'<div class="prow"><span class="psym">{esc(p["symbol"])}</span>'
+                 f'<span class="pnet">{esc(NET_LABEL.get(p.get("chain", "robinhood"), p.get("chain")))}</span>'
+                 f'<span class="pval">{fmt_usd(p["usd"])}</span>'
+                 f'<span class="pw">{w:.1f}%</span></div>')
+    if book["cash"] > 0.5:
+        w = book["cash"] / book["total"] * 100 if book["total"] else 0
+        rows += (f'<div class="prow"><span class="psym">cash/stables</span><span class="pnet"></span>'
+                 f'<span class="pval">{fmt_usd(book["cash"])}</span>'
+                 f'<span class="pw">{w:.1f}%</span></div>')
+    return rows or '<div class="simempty">no priced positions</div>'
+
+
 def sim_section(sims):
     if not sims:
         return ""
@@ -186,8 +219,10 @@ def sim_section(sims):
         handle = esc(s.get("handle", s["key"]))
         pt, p1, p24 = s["perf_total"], s["perf_1h"], s["perf_24h"]
         cls = lambda p: "up" if p >= 0 else "down"
+        book = s.get("book")
+        book_total = fmt_usd(book["total"]) if book else "—"
         if s["n_copied"] == 0:
-            body = (f'<div class="simempty">collecting data &mdash; {s["n_signals"]} signals seen, '
+            body = (f'<div class="simempty">sim collecting data &mdash; {s["n_signals"]} signals seen, '
                     f'{s["n_skipped"]} skipped (below the copy floor), no copyable trades yet</div>')
         else:
             rows = ""
@@ -215,10 +250,19 @@ def sim_section(sims):
     <div class="sub simsub">paper: ${s["aum"]:,.0f} start, sized like the live vault &middot;
       {s["n_skipped"]} signals below the copy floor</div>
     {body}
+    <div class="stitle" style="margin-top:12px">@{handle}'s real holdings &mdash; {book_total}</div>
+    {_book_rows(book)}
   </div>'''
     return f'''
 <section class="compare">
   <div class="stitle">Watchlist &mdash; simulated vaults (paper, no funds)</div>
+  <div class="simblurb">Each watchlist trader gets a card that replays their observed
+  fomo trades through a <b>$100K paper vault</b> (same sizing logic as the live one):
+  a NAV % chart vs a 0% baseline, 1h / 24h / total performance, trade counts (24h and
+  all-time), and positions + contribution &mdash; which symbols are driving the sim's
+  PnL, realized + unrealized, sorted by impact. Below the sim: the trader's
+  <b>real current holdings</b> read from chain. No funds move; these build the track
+  record for a future vault per trader.</div>
   <div class="grid">{cards}</div>
 </section>'''
 
@@ -285,11 +329,14 @@ def render(s):
                 f'<span class="pnet">{esc(NET_LABEL.get(p.get("chain","robinhood"),p.get("chain")))}</span>' \
                 f'<span class="pval">{fmt_usd(p["usd"])}</span>' \
                 f'<span class="pw">{w:.1f}%</span></div>'
-    if v["sleeve"] > 0.5:
-        w = v["sleeve"] / v["nav"] * 100
-        vpos += f'<div class="prow"><span class="psym">sleeve</span>' \
-                f'<span class="pnet">Solana</span>' \
-                f'<span class="pval">{fmt_usd(v["sleeve"])}</span>' \
+    # sleeve, itemized: every Solana holding on its own row (was one opaque lump)
+    for h in v.get("sleeve_items", []):
+        if h["usd"] < 0.5:
+            continue
+        w = h["usd"] / v["nav"] * 100 if v["nav"] else 0
+        vpos += f'<div class="prow"><span class="psym">{esc(h["symbol"])}</span>' \
+                f'<span class="pnet">Solana &middot; sleeve</span>' \
+                f'<span class="pval">{fmt_usd(h["usd"], 2)}</span>' \
                 f'<span class="pw">{w:.1f}%</span></div>'
 
     # activity feed (interleave trader detections + vault executions)
@@ -446,6 +493,9 @@ footer {{ margin-top:26px; color:var(--ink3); font-size:.74rem; font-family:var(
 .zeroline {{ stroke:var(--line); stroke-width:1; stroke-dasharray:3 3; }}
 .nochart, .simempty {{ color:var(--ink3); font-size:.8rem; font-family:var(--mono);
   padding:14px 0 10px; }}
+.simblurb {{ color:var(--ink2); font-size:.82rem; line-height:1.55; max-width:68ch;
+  margin:-4px 0 14px; }}
+.simblurb b {{ color:var(--ink); }}
 .simtiles {{ display:flex; flex-wrap:wrap; gap:14px; margin:2px 0 4px; }}
 .simtiles > div {{ display:flex; flex-direction:column; }}
 .simtiles .k {{ color:var(--ink2); font-size:.68rem; text-transform:uppercase;

@@ -56,10 +56,14 @@ def token_balance(cfg, owner, mint):
     return total, dec
 
 
-def sleeve_value_usd(cfg, pubkey):
-    """Total sleeve value: USDC + SOL + every token position, dexscreener-priced."""
-    total = sol_balance(cfg, pubkey) * (lib.price_usd(
-        "So11111111111111111111111111111111111111112", "solana") or 0)
+def sleeve_holdings(cfg, pubkey):
+    """Itemized sleeve contents: [{symbol, mint, amount, usd}] — SOL (gas), the
+    USDC buffer, and every token position, dexscreener-priced."""
+    out = []
+    sol = sol_balance(cfg, pubkey)
+    if sol > 0:
+        px = lib.price_usd("So11111111111111111111111111111111111111112", "solana") or 0
+        out.append({"symbol": "SOL (gas)", "mint": "SOL", "amount": sol, "usd": sol * px})
     for program in TOKEN_PROGRAMS:
         res = _sol(cfg, "getTokenAccountsByOwner",
                    [pubkey, {"programId": program},
@@ -70,9 +74,20 @@ def sleeve_value_usd(cfg, pubkey):
             if amt == 0:
                 continue
             mint = info["mint"]
-            price = 1.0 if mint == USDC_MINT else (lib.price_usd(mint, "solana") or 0)
-            total += amt * price
-    return total
+            if mint == USDC_MINT:
+                out.append({"symbol": "USDC (buffer)", "mint": mint, "amount": amt, "usd": amt})
+                continue
+            pinfo = lib.token_price_info(mint, "solana")
+            usd = amt * (pinfo["price"] or 0)
+            out.append({"symbol": pinfo["symbol"] or mint[:6], "mint": mint,
+                        "amount": amt, "usd": usd})
+    out.sort(key=lambda h: -h["usd"])
+    return out
+
+
+def sleeve_value_usd(cfg, pubkey):
+    """Total sleeve value: USDC + SOL + every token position, dexscreener-priced."""
+    return sum(h["usd"] for h in sleeve_holdings(cfg, pubkey))
 
 
 def _read_vault_nav(cfg, max_age_s=900):
