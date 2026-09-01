@@ -216,6 +216,14 @@ def _get_logs_adaptive(rpc_url, topics, from_block, to_block):
     try:
         return rpc(rpc_url, "eth_getLogs", [params], retries=2)
     except (RuntimeError, requests.HTTPError) as e:
+        # A rate limit (HTTP 429) is NOT a range-size cap: its "Too Many
+        # Requests" text matches the "too many" hint, and mis-classifying it
+        # made the splitter skip blocks (= silently missed trades) whenever the
+        # shared RPC key throttled. Re-raise instead — the watcher's poll loop
+        # doesn't advance its cursor on an error, so the range is retried whole.
+        if (isinstance(e, requests.HTTPError)
+                and getattr(e.response, "status_code", 0) == 429) or "429" in str(e):
+            raise
         is_size = any(h in str(e).lower() for h in _LOG_LIMIT_HINTS) or (
             isinstance(e, requests.HTTPError) and getattr(e.response, "status_code", 0)
             in (413, 400))
